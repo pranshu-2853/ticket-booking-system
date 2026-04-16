@@ -33,3 +33,60 @@ Content-Type: application/json
   "email": "test3@gmail.com",
   "password": "wrong"
 }
+
+
+### refresh
+POST http://localhost:8080/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "95896546-6261-43a9-bcbe-ce9d3d62110a"
+}
+
+### wrong refresh
+POST http://localhost:8080/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "helolll"
+}
+
+### logout
+POST http://localhost:8080/auth/logout
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0QGdtYWlsLmNvbSIsImlhdCI6MTc3NjM2MjcyOSwiZXhwIjoxNzc2MzYzNjI5fQ.jylNIxeW0FtBtyMU61f4iDq4Tvz_rMqeSOnIUH01bIg
+
+
+/// Testing
+
+
+### register
+POST http://localhost:8080/auth/register
+Content-Type: application/json
+
+{
+  "email": "test1@gmail.com",
+  "password": "1234"
+}
+
+### login
+POST http://localhost:8080/auth/login
+Content-Type: application/json
+
+{
+  "email": "test1@gmail.com",
+  "password": "1234"
+}
+
+### REFRESH
+POST http://localhost:8080/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "ed9318d6-f38a-4d9c-b3df-e7aaff83fc43"
+}
+
+### LOGOUT
+POST http://localhost:8080/auth/logout
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0MUBnbWFpbC5jb20iLCJpYXQiOjE3NzYzNjMzOTEsImV4cCI6MTc3NjM2NDI5MX0.-OU_L9_6Fx2Kx5t33TwTJVdoZqXerIaWuWsG4IoAt9E
+
+
