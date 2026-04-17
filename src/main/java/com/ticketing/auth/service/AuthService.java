@@ -11,7 +11,8 @@ import com.ticketing.auth.repository.RefreshTokenRepository;
 import com.ticketing.auth.repository.RoleRepository;
 import com.ticketing.auth.repository.UserRepository;
 import com.ticketing.auth.security.JwtUtil;
-
+import com.ticketing.shared.exception.BadRequestException;
+import com.ticketing.shared.exception.ResourceNotFoundException;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -51,7 +52,7 @@ public class AuthService {
 
         // 1. Check if user already exists
         if (userRepository.findByEmail(request.getEmail()).isPresent()) {
-            throw new RuntimeException("User already exists");
+            throw new BadRequestException("User already exists");
         }
 
         // 2. Encode password
@@ -59,7 +60,7 @@ public class AuthService {
 
         // 3. Get role
         Role role = roleRepository.findByName("ROLE_USER")
-                .orElseThrow(() -> new RuntimeException("Role not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Role not found"));
 
         // 4. Create user
         User user = new User();
@@ -88,7 +89,7 @@ public class AuthService {
         String refreshToken = UUID.randomUUID().toString();
 
         User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow();
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         refreshTokenRepository.deleteByUserId(user.getId());
 
@@ -108,14 +109,14 @@ public class AuthService {
         String refreshToken = request.getRefreshToken();
 
         RefreshToken token = refreshTokenRepository.findByToken(refreshToken)
-                .orElseThrow(() -> new RuntimeException("Invalid refresh token"));
+                .orElseThrow(() -> new BadRequestException("Invalid refresh token"));
 
         if (token.getExpiryDate().isBefore(LocalDateTime.now())) {
-            throw new RuntimeException("Refresh token expired");
+            throw new BadRequestException("Refresh token expired");
         }
 
         User user = userRepository.findById(token.getUserId())
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         String newAccessToken = jwtUtil.generateToken(user.getEmail());
 
@@ -130,7 +131,7 @@ public class AuthService {
         String email = jwtUtil.extractUsername(token);
 
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         refreshTokenRepository.deleteByUserId(user.getId());
 
