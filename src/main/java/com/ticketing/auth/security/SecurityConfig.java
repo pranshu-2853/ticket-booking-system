@@ -45,10 +45,6 @@ public class SecurityConfig {
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 )
-
-                // 🔥 REGISTER YOUR AUTH PROVIDER
-                .authenticationProvider(authenticationProvider())
-
                 // Authorization rules
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/auth/**").permitAll()

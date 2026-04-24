@@ -13,6 +13,7 @@ import com.ticketing.auth.repository.UserRepository;
 import com.ticketing.auth.security.JwtUtil;
 import com.ticketing.shared.exception.BadRequestException;
 import com.ticketing.shared.exception.ResourceNotFoundException;
+import jakarta.validation.Valid;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -104,7 +105,7 @@ public class AuthService {
     }
 
     // REFRESH
-    public LoginResponse refresh(RefreshRequest request) {
+    public LoginResponse refresh(@Valid  RefreshRequest request) {
 
         String refreshToken = request.getRefreshToken();
 
