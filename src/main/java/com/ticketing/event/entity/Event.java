@@ -1,12 +1,11 @@
 package com.ticketing.event.entity;
 
-import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
+import jakarta.persistence.*;
+import lombok.Data;
 
 import java.time.LocalDateTime;
 
+@Data
 @Entity
 public class Event {
 
@@ -19,6 +18,4 @@ public class Event {
     private LocalDateTime eventTime;
 
     private String location;
-
-    // getters and setters
 }
