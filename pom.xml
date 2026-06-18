@@ -95,9 +95,16 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!--PostgreSQL support was split into a separate module  core and postgres so add both -->
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>
+            <version>10.17.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
             <version>10.17.0</version>
         </dependency>
 	</dependencies>

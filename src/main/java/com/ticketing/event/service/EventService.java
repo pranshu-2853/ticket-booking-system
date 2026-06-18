@@ -6,6 +6,7 @@ import com.ticketing.event.entity.Event;
 import com.ticketing.event.repository.EventRepository;
 import com.ticketing.shared.exception.ResourceNotFoundException;
 import com.ticketing.shared.exception.BadRequestException;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -20,6 +21,7 @@ public class EventService {
         this.eventRepository = eventRepository;
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     public EventResponseDTO createEvent(EventRequestDTO request) {
 
         // 1. Basic validation
