@@ -5,6 +5,7 @@ import com.ticketing.event.dto.EventResponseDTO;
 import com.ticketing.event.service.EventService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.http.HttpStatus;
 
 import java.util.List;
 
@@ -22,7 +23,7 @@ public class EventController {
     @PostMapping
     public ResponseEntity<EventResponseDTO> createEvent(@RequestBody EventRequestDTO request) {
         EventResponseDTO response = eventService.createEvent(request);
-        return ResponseEntity.ok(response);
+        return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
     // 2. Get All Events

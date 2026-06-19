@@ -6,6 +6,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.access.AccessDeniedException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -85,6 +86,20 @@ public class GlobalExceptionHandler {
         );
 
         return new ResponseEntity<>(error, HttpStatus.BAD_REQUEST);
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiError> handleAccessDenied(
+            AccessDeniedException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                "Access denied",
+                HttpStatus.FORBIDDEN.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(error, HttpStatus.FORBIDDEN);
     }
 
     // 4. Fallback (VERY IMPORTANT)
