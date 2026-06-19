@@ -70,6 +70,13 @@ public class EventService {
                 .collect(Collectors.toList());
     }
 
+    public Event getEventEntityById(Long id) {
+        return eventRepository.findById(id)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Event not found with id: " + id));
+    }
+
     private EventResponseDTO mapToResponse(Event event) {
         EventResponseDTO dto = new EventResponseDTO();
         dto.setId(event.getId());

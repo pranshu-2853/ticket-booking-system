@@ -102,6 +102,20 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(error, HttpStatus.FORBIDDEN);
     }
 
+    @ExceptionHandler(SeatAlreadyExistsException.class)
+    public ResponseEntity<ApiError> handleSeatAlreadyExists(
+            SeatAlreadyExistsException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.CONFLICT.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
     // 4. Fallback (VERY IMPORTANT)
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleGeneric(
