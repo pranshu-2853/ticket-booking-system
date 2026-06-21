@@ -5,6 +5,7 @@ import com.ticketing.event.service.EventService;
 import com.ticketing.seat.entity.Seat;
 import com.ticketing.seat.entity.SeatStatus;
 import com.ticketing.seat.repository.SeatRepository;
+import com.ticketing.shared.exception.ResourceNotFoundException;
 import com.ticketing.shared.exception.SeatAlreadyExistsException;
 import org.springframework.stereotype.Service;
 
@@ -54,6 +55,15 @@ public class SeatService {
         eventService.getEventEntityById(eventId);
 
         return seatRepository.findByEventId(eventId);
+    }
+
+    public Seat getSeatWithLock(Long seatId) {
+
+        return seatRepository.findByIdWithLock(seatId)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Seat not found with id: " + seatId
+                        ));
     }
 
 }

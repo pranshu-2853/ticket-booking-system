@@ -116,6 +116,34 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(error, HttpStatus.CONFLICT);
     }
 
+    @ExceptionHandler(SeatAlreadyBookedException.class)
+    public ResponseEntity<ApiError> handleSeatAlreadyBooked(
+            SeatAlreadyBookedException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.CONFLICT.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(PaymentFailedException.class)
+    public ResponseEntity<ApiError> handlePaymentFailed(
+            PaymentFailedException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.BAD_REQUEST.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(error, HttpStatus.BAD_REQUEST);
+    }
+
     // 4. Fallback (VERY IMPORTANT)
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleGeneric(

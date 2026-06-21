@@ -86,11 +86,11 @@ public class AuthService {
                 )
         );
 
-        String accessToken = jwtUtil.generateToken(request.getEmail());
-        String refreshToken = UUID.randomUUID().toString();
-
         User user = userRepository.findByEmail(request.getEmail())
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+
+        String accessToken = jwtUtil.generateToken(user.getEmail(), user.getId());
+        String refreshToken = UUID.randomUUID().toString();
 
         refreshTokenRepository.deleteByUserId(user.getId());
 
@@ -119,7 +119,7 @@ public class AuthService {
         User user = userRepository.findById(token.getUserId())
                 .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
-        String newAccessToken = jwtUtil.generateToken(user.getEmail());
+        String newAccessToken = jwtUtil.generateToken(user.getEmail(), user.getId());
 
         return new LoginResponse(newAccessToken, refreshToken);
     }
