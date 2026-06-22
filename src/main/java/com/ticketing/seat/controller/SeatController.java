@@ -1,12 +1,17 @@
 package com.ticketing.seat.controller;
 
+import com.ticketing.auth.security.JwtUtil;
+import com.ticketing.seat.dto.SeatHoldRequest;
+import com.ticketing.seat.dto.SeatHoldResponse;
 import com.ticketing.seat.dto.SeatRequest;
 
 import com.ticketing.seat.dto.SeatResponse;
 import com.ticketing.seat.entity.Seat;
+import com.ticketing.seat.service.SeatHoldService;
 import com.ticketing.seat.service.SeatService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -16,9 +21,14 @@ import java.util.List;
 public class SeatController {
 
     private final SeatService seatService;
+    private final SeatHoldService seatHoldService;
+    private final JwtUtil jwtUtil;
 
-    public SeatController(SeatService seatService) {
+    public SeatController(SeatService seatService,SeatHoldService seatHoldService,
+                          JwtUtil jwtUtil) {
         this.seatService = seatService;
+        this.seatHoldService = seatHoldService;
+        this.jwtUtil = jwtUtil;
     }
 
     @PostMapping("/{eventId}/seats")
@@ -45,6 +55,39 @@ public class SeatController {
                 .toList();
     }
 
+    @PostMapping("/hold")
+    public ResponseEntity<SeatHoldResponse> holdSeat(
+            @Valid @RequestBody SeatHoldRequest request,
+            @RequestHeader("Authorization") String authHeader) {
+
+        String token = authHeader.substring(7);
+
+        Long userId = jwtUtil.extractUserId(token);
+
+        boolean held = seatHoldService.tryHoldSeat(
+                request.getEventId(),
+                request.getSeatId(),
+                userId
+        );
+
+        if (held) {
+            return ResponseEntity.ok(
+                    new SeatHoldResponse(
+                            true,
+                            "Seat held successfully"
+                    )
+            );
+        }
+
+        return ResponseEntity.badRequest()
+                .body(
+                        new SeatHoldResponse(
+                                false,
+                                "Seat is already held"
+                        )
+                );
+    }
+
     private SeatResponse mapToResponse(Seat seat) {
         return new SeatResponse(
                 seat.getId(),
@@ -53,4 +96,5 @@ public class SeatController {
                 seat.getStatus()
         );
     }
+
 }

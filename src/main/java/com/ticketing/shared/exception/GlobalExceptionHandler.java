@@ -144,6 +144,21 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(error, HttpStatus.BAD_REQUEST);
     }
 
+    @ExceptionHandler(SeatNotHeldByUserException.class)
+    public ResponseEntity<ApiError> handleSeatNotHeldByUserException(
+            SeatNotHeldByUserException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.FORBIDDEN.value(),
+                request.getRequestURI()
+        );
+
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(error);
+    }
+
     // 4. Fallback (VERY IMPORTANT)
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleGeneric(

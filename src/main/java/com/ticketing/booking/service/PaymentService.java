@@ -7,6 +7,6 @@ public class PaymentService {
 
     public boolean process() {
 
-        return true; //Math.random() > 0.3;
+        return Math.random() > 0.3;
     }
 }
