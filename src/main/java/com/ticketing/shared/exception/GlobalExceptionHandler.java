@@ -7,7 +7,9 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.access.AccessDeniedException;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -159,11 +161,34 @@ public class GlobalExceptionHandler {
                 .body(error);
     }
 
+    @ExceptionHandler(PaymentServiceUnavailableException.class)
+    public ResponseEntity<ApiError> handlePaymentServiceUnavailable(
+            PaymentServiceUnavailableException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.SERVICE_UNAVAILABLE.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(
+                error,
+                HttpStatus.SERVICE_UNAVAILABLE
+        );
+    }
+
     // 4. Fallback (VERY IMPORTANT)
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleGeneric(
             Exception ex,
             HttpServletRequest request) {
+
+        log.error(
+                "Unhandled exception on {}",
+                request.getRequestURI(),
+                ex
+        );
 
         ApiError error = new ApiError(
                 "Something went wrong",
