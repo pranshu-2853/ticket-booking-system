@@ -66,4 +66,15 @@ public class SeatService {
                         ));
     }
 
+    public Seat getSeatById(Long seatId) {
+
+        return seatRepository.findById(seatId)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException(
+                                "Seat not found with id: " + seatId
+                        ));
+    }
+
+
+
 }

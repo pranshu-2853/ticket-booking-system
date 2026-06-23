@@ -23,6 +23,10 @@ public class Seat {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Version
+    @Column(nullable = false)
+    private Long version;
+
     @Column(name = "seat_number", nullable = false)
     private String seatNumber;
 
@@ -57,6 +61,9 @@ public class Seat {
 
 
     public Long getId() { return id; }
+    public Long getVersion() {
+        return version;
+    }
     public String getSeatNumber() { return seatNumber; }
     public void setSeatNumber(String seatNumber) { this.seatNumber = seatNumber; }
     public SeatStatus getStatus() { return status; }
