@@ -13,17 +13,19 @@ import com.ticketing.auth.repository.UserRepository;
 import com.ticketing.auth.security.JwtUtil;
 import com.ticketing.shared.exception.BadRequestException;
 import com.ticketing.shared.exception.ResourceNotFoundException;
-import jakarta.validation.Valid;
+
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+
 import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Service
+
 public class AuthService {
 
     private final AuthenticationManager authenticationManager;
@@ -105,7 +107,7 @@ public class AuthService {
     }
 
     // REFRESH
-    public LoginResponse refresh(@Valid  RefreshRequest request) {
+    public LoginResponse refresh( RefreshRequest request) {
 
         String refreshToken = request.getRefreshToken();
 
@@ -127,6 +129,10 @@ public class AuthService {
     // LOGOUT
     @Transactional
     public String logout(String authHeader) {
+
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            throw new BadRequestException("Invalid Authorization header");
+        }
 
         String token = authHeader.substring(7);
         String email = jwtUtil.extractUsername(token);

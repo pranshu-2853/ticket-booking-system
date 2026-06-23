@@ -6,6 +6,7 @@ import com.ticketing.booking.dto.BookingResponse;
 import com.ticketing.booking.entity.Booking;
 import com.ticketing.booking.service.BookingService;
 import com.ticketing.booking.service.IdempotencyService;
+import com.ticketing.shared.exception.BadRequestException;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -41,6 +42,10 @@ public class BookingController {
                     value = "Idempotency-Key",
                     required = false
             ) String idempotencyKey) {
+
+                if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                        throw new BadRequestException("Invalid Authorization header");
+                }
 
         Long userId = jwtUtil.extractUserId(authHeader.substring(7));
 

@@ -9,6 +9,7 @@ import com.ticketing.seat.dto.SeatResponse;
 import com.ticketing.seat.entity.Seat;
 import com.ticketing.seat.service.SeatHoldService;
 import com.ticketing.seat.service.SeatService;
+import com.ticketing.shared.exception.BadRequestException;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -59,6 +60,10 @@ public class SeatController {
     public ResponseEntity<SeatHoldResponse> holdSeat(
             @Valid @RequestBody SeatHoldRequest request,
             @RequestHeader("Authorization") String authHeader) {
+
+                if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                        throw new BadRequestException("Invalid Authorization header");
+                }
 
         String token = authHeader.substring(7);
 
