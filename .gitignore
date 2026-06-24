@@ -34,3 +34,8 @@ build/
 
 ### Documents ###
 ticket-booking RoadMap.docx
+
+# Environment variables
+.env
+.env.*
+!.env.example
