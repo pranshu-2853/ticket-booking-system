@@ -1,497 +1,422 @@
 # Ticket Booking System
 
-A production-thinking backend built with Spring Boot, demonstrating real concurrency handling, pessimistic locking, Redis soft locks, JWT authentication, Flyway migrations, and transactional booking flows.
+A production-style backend that solves a real concurrency problem: **how do you prevent two users from booking the same seat at the same moment?**
 
-> **Status: Core Booking System Complete (~85%)** — Remaining work includes Circuit Breaker, Idempotency Keys, Optimistic Locking Comparison, and Deployment.
+Built with Spring Boot 3, PostgreSQL, and Redis — using a two-layer locking strategy, transactional booking flows, JWT authentication, circuit breakers, idempotency protection, and Flyway-managed schema migrations. Deployed on Railway.
 
 ---
 
-## What This Project Demonstrates
+## Live Demo
+> Note:
+> Most endpoints are protected by JWT authentication.
+> Open Swagger, login first, copy the access token, then use the **Authorize** button before testing secured APIs.
 
-- Pessimistic locking to guarantee seat exclusivity under concurrent requests
-- Redis soft lock as a UX optimization layer (with graceful DB fallback)
-- JWT access token + refresh token authentication
-- Single active refresh token per user
-- Modular monolith architecture with clean separation of concerns
-- Concurrency-tested booking flow
-- Transactional booking and payment processing
-- Flyway-managed database schema migrations
-- Swagger/OpenAPI documentation with JWT support
-- Docker-based local development environment
+**Base URL:** `https://ticket-booking-system.up.railway.app`
+
+**Swagger UI:** `https://ticket-booking-system.up.railway.app/swagger-ui/index.html`
+
+| Role  | Email           | Password |
+|-------|-----------------|----------|
+| Admin | admin@test.com  | 123456   |
+| User  | user@test.com   | 123456   |
+
+<img width="1600" height="762" alt="image" src="https://github.com/user-attachments/assets/7193ca6b-024b-41af-9a7a-0a04dd408b97" />
+
+---
+
+## The Core Problem
+
+When a popular event goes live, hundreds of users hit "Book" simultaneously. Without the right locking strategy, two users can read the same seat as `AVAILABLE`, both proceed to payment, and both end up with a booking — a double booking.
+
+This project implements a two-layer defense against that:
+
+```
+User A ──┐
+User B ──┤──→ Redis Soft Lock (first line) ──→ PostgreSQL Pessimistic Lock (guarantee)
+User C ──┘
+```
+
+**Redis** stops most concurrent requests early — cheaply, at the cache layer.  
+**PostgreSQL** is the source of truth — the lock that actually guarantees correctness.
+
+If Redis goes down, the system falls back to DB locking seamlessly. No double bookings either way.
 
 ---
 
 ## Architecture
 
-```text
-┌─────────────────────────────────────────────────────────┐
-│                  Spring Boot Application                │
-│                                                         │
-│  ┌──────┐  ┌───────┐  ┌───────┐  ┌─────────┐            │
-│  │ auth │  │ event │  │ seat  │  │ booking │            │
-│  └──────┘  └───────┘  └───────┘  └─────────┘            │
-│       ↓          ↓          ↓           ↓               │
-│  ┌──────────────────────────────────────────────┐       │
-│  │             PostgreSQL Database              │       │
-│  └──────────────────────────────────────────────┘       │
-│                                                         │
-│  ┌──────────────────────────────────────────────┐       │
-│  │     Redis (Seat Hold / Soft Lock Layer)      │       │
-│  └──────────────────────────────────────────────┘       │
-└─────────────────────────────────────────────────────────┘
+```
+┌──────────────────────────────────────────────────────────┐
+│                   Spring Boot Application                │
+│                                                          │
+│   ┌────────┐  ┌─────────┐  ┌────────┐  ┌─────────────┐   │
+│   │  auth  │  │  event  │  │  seat  │  │   booking   │   │
+│   └────────┘  └─────────┘  └────────┘  └─────────────┘   │
+│         ↓           ↓           ↓              ↓         │
+│   ┌─────────────────────────────────────────────────┐    │
+│   │              PostgreSQL (source of truth)       │    │
+│   └─────────────────────────────────────────────────┘    │
+│                                                          │
+│   ┌─────────────────────────────────────────────────┐    │
+│   │         Redis (seat hold / soft lock layer)     │    │
+│   └─────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
 ```
 
-### Why Modular Monolith?
+**Why a modular monolith and not microservices?**
 
-Microservices introduce distributed transaction challenges (sagas, eventual consistency, message coordination) that are unnecessary for a ticket booking system where booking, payment, and seat updates should remain atomic.
-
-A modular monolith provides:
-
-- Strong transactional consistency
-- Simpler deployment
-- Easier debugging
-- Clear module boundaries
-- Room for future service extraction if needed
-
----
-
-## Authentication Flow
-
-```text
-Login Request
-      │
-      ▼
-Generate JWT Access Token
-      │
-      ▼
-Client Stores Token
-      │
-      ▼
-Authorization Header
-Bearer <token>
-      │
-      ▼
-JWT Filter Validation
-      │
-      ▼
-Authenticated Request
-```
-
-Refresh Tokens:
-
-```text
-Login
-  │
-  ▼
-Access Token + Refresh Token
-  │
-  ▼
-Access Token Expires
-  │
-  ▼
-/auth/refresh
-  │
-  ▼
-New Access Token
-```
+Booking, payment, and seat updates must be atomic. Microservices would require distributed transactions (sagas, eventual consistency, message coordination) that add complexity without benefit here. The modular monolith keeps strong transactional guarantees while maintaining clean module boundaries that could be extracted later if needed.
 
 ---
 
 ## Booking Flow
 
-```text
-User → POST /bookings
-         │
-         ▼
+```
+POST /bookings
+       │
+       ▼
 BookingService (@Transactional)
-         │
-         ├─→ Acquire PESSIMISTIC_WRITE lock
-         │
-         ├─→ Validate Seat Availability
-         │
-         ├─→ Verify Redis Hold Ownership
-         │
-         ├─→ Simulate Payment
-         │
-         ├─→ Update Seat Status
-         │
-         ├─→ Save Booking
-         │
-         └─→ Release Redis Hold
-         │
-         ▼
-      Response
+       │
+       ├──→ Acquire PESSIMISTIC_WRITE lock on seat row
+       │
+       ├──→ Check seat status — throw SeatAlreadyBookedException if BOOKED
+       │
+       ├──→ Verify Redis hold ownership — caller must own the hold
+       │
+       ├──→ Simulate payment via PaymentService
+       │       └──→ Circuit breaker + retry wraps this call
+       │
+       ├──→ Mark seat BOOKED, save booking record
+       │
+       └──→ Release Redis hold
+              │
+              ▼
+           Response — transaction commits, DB lock releases
 ```
 
 ---
 
 ## Locking Strategy
 
-### Database Locking (Source of Truth)
+### Why Pessimistic Locking?
 
-The booking system uses:
+Optimistic locking (`@Version`) is the right choice for low-contention reads. But for a seat booking — where multiple users are contending over the exact same row at the exact same moment — optimistic locking causes failures that get retried repeatedly, degrading into a thundering herd.
 
 ```java
+// Pessimistic lock — only one transaction touches this row at a time
 @Lock(LockModeType.PESSIMISTIC_WRITE)
+@Query("SELECT s FROM Seat s WHERE s.id = :id")
+Optional<Seat> findByIdWithLock(@Param("id") Long id);
 ```
 
-to guarantee that only one transaction can modify a seat at a time.
+The optimistic locking test in this project deliberately demonstrates the failure mode:
 
-Benefits:
-
-- Prevents double booking
-- Prevents race conditions
-- Guarantees seat consistency
-
----
+```
+OptimisticLockingTest — 8 threads, 1 seat
+→ ObjectOptimisticLockingFailureException thrown on concurrent writes
+→ Booking count unreliable
+→ This is why pessimistic was chosen
+```
 
 ### Redis Soft Lock (Optimization Layer)
 
-When a user selects a seat:
+Before a user confirms booking, they hold the seat for 5 minutes:
 
-```text
+```
 POST /seats/hold
-        │
-        ▼
-SET seat_lock:{eventId}:{seatId}
-        userId
-        NX EX 300
+       │
+       ▼
+SET seat_lock:{eventId}:{seatId}  userId  NX EX 300
 ```
 
-Example:
+- `NX` — only set if key doesn't exist (atomic)
+- `EX 300` — auto-expires in 5 minutes
 
-```text
-seat_lock:1:5 = 101
-```
+If another user tries to hold the same seat, they get a `409 Conflict` immediately — without touching the database.
 
-Meaning:
-
-```text
-Event 1
-Seat 5
-Held by User 101
-```
-
-Redis provides:
-
-- Better user experience
-- Temporary reservation
-- Reduced database contention
-- Automatic expiration (TTL)
-
-If Redis becomes unavailable:
-
-```text
-Redis Failure
-      │
-      ▼
-Continue Request
-      │
-      ▼
-Database Lock Still Protects System
-```
-
-Database locking remains the source of truth.
+If Redis is unavailable, the system logs a warning and continues. The DB pessimistic lock still prevents double bookings.
 
 ---
 
-## Concurrency Testing
+## Concurrency Test Results
 
-The booking flow was verified using concurrent test execution.
+<img width="1442" height="857" alt="image" src="https://github.com/user-attachments/assets/cd9fd383-81c2-41ec-851e-37c40f6480b4" />
 
-### Scenario
 
-```text
-8 Users
-1 Seat
-8 Concurrent Booking Attempts
+```
+Scenario: 8 threads, 1 seat, all booking simultaneously
+Tools:    ExecutorService + CountDownLatch(1) — all threads release at once
+
+Result:
+  ✓ bookingRepository.countBySeatId(seatId) == 1
+  ✓ Exactly 1 booking persisted
+  ✓ Remaining 7 requests fail with SeatAlreadyBookedException
+  ✓ Passed consistently across @RepeatedTest(3)
 ```
 
-### Tools Used
+---
 
-- ExecutorService
-- CountDownLatch
-- Future
-- JUnit 5
+## Resilience
 
-### Result
+### Circuit Breaker + Retry (Resilience4j)
 
-```text
-✓ Exactly 1 booking succeeds
-✓ Remaining requests fail safely
-✓ No double booking occurs
-✓ Data consistency maintained
+Payment calls are wrapped with a circuit breaker to prevent cascade failures:
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    instances:
+      paymentService:
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        slidingWindowSize: 5
+  retry:
+    instances:
+      paymentService:
+        maxAttempts: 3
+        waitDuration: 500ms
 ```
 
-This validates that pessimistic locking correctly protects inventory under high contention.
+Aspect ordering is explicitly configured so the circuit breaker wraps the retry — not the other way around. This ensures that retry attempts don't each count as separate circuit breaker failures.
+
+```yaml
+  circuitbreaker:
+    circuitBreakerAspectOrder: 1
+  retry:
+    retryAspectOrder: 2
+```
+
+When the circuit opens, a fallback immediately returns a payment failure without waiting for timeouts.
+
+### Idempotency Keys
+
+Double-clicks and network retries won't create duplicate bookings. Clients send a UUID header:
+
+```
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+```
+
+The result is stored in Redis for 24 hours. Identical requests return the cached response.
 
 ---
 
 ## API Endpoints
 
+The API is documented using OpenAPI 3 and can be explored directly through Swagger UI.
+
+<img width="1600" height="848" alt="image" src="https://github.com/user-attachments/assets/fd892268-4784-4d6b-93b0-c7fba41a9487" />
+
 ### Authentication
 
-| Method | Endpoint | Description |
-|----------|----------|-------------|
-| POST | `/auth/register` | Register user |
-| POST | `/auth/login` | Login user |
-| POST | `/auth/refresh` | Generate new access token |
-| POST | `/auth/logout` | Logout user |
+| Method | Endpoint        | Auth     | Description              |
+|--------|-----------------|----------|--------------------------|
+| POST   | /auth/register  | Public   | Register new user        |
+| POST   | /auth/login     | Public   | Login, returns JWT pair  |
+| POST   | /auth/refresh   | Public   | Refresh access token     |
+| POST   | /auth/logout    | Bearer   | Invalidate refresh token |
 
 ### Events
 
-| Method | Endpoint | Description |
-|----------|----------|-------------|
-| POST | `/events` | Create event |
-| GET | `/events` | Get all events |
-| GET | `/events/{id}` | Get event by ID |
+| Method | Endpoint       | Auth     | Description        |
+|--------|----------------|----------|--------------------|
+| POST   | /events        | Admin    | Create event       |
+| GET    | /events        | Bearer   | List all events    |
+| GET    | /events/{id}   | Bearer   | Get event by ID    |
 
 ### Seats
 
-| Method | Endpoint | Description |
-|----------|----------|-------------|
-| POST | `/seats` | Create seat |
-| GET | `/seats/{id}` | Get seat by ID |
-| GET | `/seats/event/{eventId}` | Get seats by event |
-| GET | `/seats/event/{eventId}/available` | Get available seats |
-| POST | `/seats/hold` | Hold seat in Redis |
+| Method | Endpoint                        | Auth   | Description              |
+|--------|---------------------------------|--------|--------------------------|
+| POST   | /seats                          | Admin  | Add seat to event        |
+| GET    | /seats/{id}                     | Bearer | Get seat by ID           |
+| GET    | /seats/event/{eventId}          | Bearer | List seats for event     |
+| GET    | /seats/event/{eventId}/available| Bearer | List available seats     |
+| POST   | /seats/hold                     | Bearer | Hold seat for 5 minutes  |
 
 ### Bookings
 
-| Method | Endpoint | Description |
-|----------|----------|-------------|
-| POST | `/bookings` | Create booking |
-| GET | `/bookings/{id}` | Get booking by ID |
+| Method | Endpoint        | Auth   | Description       |
+|--------|-----------------|--------|-------------------|
+| POST   | /bookings       | Bearer | Create booking    |
+| GET    | /bookings/{id}  | Bearer | Get booking by ID |
+
+
 
 ---
 
-## API Documentation
+## Failure Handling
 
-Swagger/OpenAPI is integrated for API exploration and testing.
-
-Swagger UI:
-
-```text
-http://localhost:8080/swagger-ui/index.html
-```
-
-Features:
-
-- JWT Authorization support
-- Interactive endpoint testing
-- Request/Response schemas
-- OpenAPI 3 documentation
+| Scenario                          | Behavior                                      |
+|-----------------------------------|-----------------------------------------------|
+| Two users book the same seat      | DB pessimistic lock — one succeeds, one fails |
+| Seat already booked               | `SeatAlreadyBookedException` (409)            |
+| Payment fails                     | Transaction rolls back, seat stays AVAILABLE  |
+| Redis unavailable                 | Warning logged, DB lock handles concurrency   |
+| Seat hold expires                 | Redis TTL auto-releases after 5 minutes       |
+| User books another user's seat    | Ownership validation fails (403)              |
+| Duplicate booking request         | Idempotency key returns cached response       |
+| Payment service down              | Circuit breaker opens, fallback returns error |
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology |
-|---------|------------|
-| Language | Java 21 |
-| Framework | Spring Boot 3 |
-| Security | Spring Security |
-| Authentication | JWT |
-| Database | PostgreSQL |
-| ORM | Spring Data JPA / Hibernate |
-| Cache | Redis |
-| Database Migrations | Flyway |
-| API Documentation | Swagger / OpenAPI |
-| Testing | JUnit 5 |
-| Build Tool | Maven |
-| Containerization | Docker |
+| Layer               | Technology                    |
+|---------------------|-------------------------------|
+| Language            | Java 21                       |
+| Framework           | Spring Boot 3                 |
+| Security            | Spring Security + JWT         |
+| Database            | PostgreSQL                    |
+| ORM                 | Spring Data JPA / Hibernate   |
+| Cache               | Redis                         |
+| Migrations          | Flyway                        |
+| Resilience          | Resilience4j                  |
+| API Docs            | Swagger / OpenAPI 3           |
+| Testing             | JUnit 5, ExecutorService      |
+| Build               | Maven                         |
+| Containerization    | Docker                        |
+| Deployment          | Railway                       |
 
 ---
 
-## Database Versioning
+## Project Highlights
 
-Schema changes are managed using Flyway migrations.
-
-Current migrations:
-
-```text
-V1__init.sql
-V2__seed_roles.sql
-V3__update_seat_schema.sql
-V4__update_bookings_schema.sql
-```
-
-Benefits:
-
-- Reproducible database setup
-- Version-controlled schema evolution
-- Consistent environments across machines
-
----
+- JWT Authentication & Authorization
+- Refresh Token Support
+- Role-Based Access Control (Admin/User)
+- Redis Seat Hold System
+- Pessimistic Locking
+- Optimistic Locking Comparison
+- Retry Pattern (Resilience4j)
+- Circuit Breaker Pattern (Resilience4j)
+- Idempotency Keys
+- Flyway Database Migrations
+- Dockerized Deployment
+- Railway Cloud Deployment
+- 80 Automated Tests
 
 ## Database Schema
 
-```text
-roles
- └── id
- └── name
+```
+roles              users                  events
+├── id             ├── id                 ├── id
+└── name           ├── email (UNIQUE)     ├── name
+                   ├── password           ├── location
+                   └── role_id            └── event_time
 
-users
- └── id
- └── email
- └── password
- └── role_id
+seats                          bookings
+├── id                         ├── id
+├── seat_number                ├── user_id
+├── status (AVAILABLE/BOOKED)  ├── seat_id (UNIQUE)
+├── event_id                   └── booked_at
+├── created_at
+└── updated_at
 
 refresh_tokens
- └── id
- └── user_id
- └── token
- └── expiry_date
-
-events
- └── id
- └── name
- └── location
- └── event_time
-
-seats
- └── id
- └── seat_number
- └── status
- └── event_id
- └── created_at
- └── updated_at
-
-bookings
- └── id
- └── user_id
- └── seat_id
- └── booked_at
+├── id
+├── user_id
+├── token
+└── expiry_date
 ```
 
----
-
-## Failure Scenarios
-
-| Scenario | Handling Strategy |
-|-----------|------------------|
-| Two users book same seat | Pessimistic DB lock |
-| Seat already booked | SeatAlreadyBookedException |
-| Payment fails | Transaction rollback |
-| Redis unavailable | Fallback to DB locking |
-| Hold expires | Redis TTL auto-release |
-| User books another user's held seat | Ownership validation failure |
-| Invalid seat ID | ResourceNotFoundException |
+Schema is version-controlled via Flyway migrations (`V1` through `V6`), including demo data seeding for local and production environments.
 
 ---
 
 ## Running Locally
 
-### Prerequisites
-
-- Java 21
-- Maven
-- PostgreSQL
-- Redis
-
-### Clone Repository
+Clone and start everything with two commands:
 
 ```bash
-git clone https://github.com/your-username/ticket-booking-system.git
+git clone https://github.com/pranshu-2853/ticket-booking-system.git
 cd ticket-booking-system
-```
-
-### Start Services
-
-```bash
 docker compose up -d
-```
-
-### Run Application
-
-```bash
 mvn spring-boot:run
 ```
 
-Application:
+Local App:
 
-```text
 http://localhost:8080
-```
 
-Swagger:
+Local Swagger:
+
+http://localhost:8080/swagger-ui/index.html
+
+### Swagger Access
+
+The application is secured using JWT authentication.
+
+After opening Swagger:
+
+1. Login using one of the demo accounts.
+2. Copy the access token from the login response.
+3. Click **Authorize**.
+4. Enter:
 
 ```text
-http://localhost:8080/swagger-ui/index.html
+Bearer <your_access_token>
 ```
 
----
+5. Execute authenticated endpoints.
 
-## Project Progress
+Only authentication and Swagger endpoints are publicly accessible.
 
-| Phase | Description | Status |
-|---------|-------------|---------|
-| 0 | Project Setup, PostgreSQL, Redis, Docker | ✅ Done |
-| 1 | Authentication & Authorization | ✅ Done |
-| 2 | Event & Seat Management | ✅ Done |
-| 3 | Booking Module & Concurrency Testing | ✅ Done |
-| 4 | Redis Soft Lock & Ownership Validation | ✅ Done |
-| 5 | Flyway & Swagger Integration | ✅ Done |
-| 6 | Resilience4j Circuit Breaker | ⏳ Planned |
-| 7 | Idempotency Key Support | ⏳ Planned |
-| 8 | Optimistic vs Pessimistic Locking Comparison | ⏳ Planned |
-| 9 | Deployment & Final Documentation | ⏳ Planned |
+### Environment Variables
 
----
+```env
+DB_URL=jdbc:postgresql://localhost:5432/ticketdb
+DB_USER=postgres
+DB_PASS=postgres
+REDIS_HOST=localhost
+JWT_SECRET=your-secret-key
+```
 
-## Concepts Demonstrated
-
-### Spring Boot
-
-- Dependency Injection
-- Layered Architecture
-- DTO Pattern
-- Validation
-- Exception Handling
-- Transaction Management
-
-### Spring Security
-
-- JWT Authentication
-- Authorization
-- Security Filters
-- Refresh Tokens
-
-### Database
-
-- JPA
-- Hibernate
-- Entity Relationships
-- Repository Pattern
-- Flyway
-
-### Concurrency
-
-- Race Conditions
-- Pessimistic Locking
-- Concurrent Testing
-- Transaction Isolation
-
-### Redis
-
-- TTL
-- SETNX
-- Seat Holds
-- Ownership Validation
-- Soft Locks
+See `.env.example` for the full list.
 
 ---
+## Production Deployment
 
-## Planned Improvements
+The application is deployed on Railway using:
 
-- Resilience4j Circuit Breaker
-- Retry Mechanism
-- Idempotency Keys
-- Optimistic Locking Comparison
-- Docker Deployment
-- CI/CD Pipeline
-- Monitoring & Metrics
+- Spring Boot Service
+- PostgreSQL Database
+- Redis Cache
+- Flyway Migrations
+- Docker Build Pipeline
 
----
+Production URL:
 
-**Current Status:** Authentication, Event Management, Seat Management, Booking System, Concurrency Protection, Redis Seat Holds, Flyway, and Swagger are fully implemented and tested.
+https://ticket-booking-system.up.railway.app
+
+Production Swagger:
+
+https://ticket-booking-system.up.railway.app/swagger-ui/index.html
+
+## Testing
+
+```
+80 tests — 0 failures — 0 errors
+
+Controller Tests      — auth, booking, seat, event
+Service Tests         — booking flow, payment, Redis hold logic
+Concurrency Tests     — 8-thread race condition validation
+Exception Handler Tests — all custom exception mappings verified
+```
+
+## Lessons Learned
+
+Through this project I gained practical experience with:
+
+- Spring Security and JWT authentication
+- Database transaction management
+- Concurrency handling in high-contention scenarios
+- Redis caching and distributed locking concepts
+- Resilience patterns using Retry and Circuit Breaker
+- Flyway migration management
+- Docker containerization
+- Railway deployment and environment configuration
+- Writing maintainable and testable backend services
+
+
+
+
