@@ -140,4 +140,20 @@ class SeatHoldServiceTest {
         assertEquals("30", result);
         verify(valueOperations).get("seat_lock:10:20");
     }
+
+    @Test
+    void getSeatHolder_shouldReturnNull_whenRedisThrowsException() {
+        // Arrange
+        Long eventId = 10L;
+        Long seatId = 20L;
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("seat_lock:10:20"))
+                .thenThrow(new RuntimeException("redis down"));
+
+        // Act
+        String result = seatHoldService.getSeatHolder(eventId, seatId);
+
+        // Assert — fail open: a Redis outage must not report a holder
+        org.junit.jupiter.api.Assertions.assertNull(result);
+    }
 }

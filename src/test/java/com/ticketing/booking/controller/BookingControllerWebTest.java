@@ -66,7 +66,7 @@ class BookingControllerWebTest {
         LocalDateTime bookedAt = LocalDateTime.of(2026, 6, 24, 12, 0);
 
         when(jwtUtil.extractUserId("token")).thenReturn(42L);
-        when(idempotencyService.getCachedResponse("idem-1")).thenReturn(Optional.empty());
+        when(idempotencyService.getCachedResponse(42L, "idem-1")).thenReturn(Optional.empty());
         when(bookingService.createBooking(42L, 11L)).thenReturn(booking);
         when(booking.getId()).thenReturn(100L);
         when(booking.getUser()).thenReturn(user);
@@ -88,9 +88,9 @@ class BookingControllerWebTest {
                 .andExpect(jsonPath("$.bookedAt").value("2026-06-24T12:00:00"));
 
         verify(jwtUtil).extractUserId("token");
-        verify(idempotencyService).getCachedResponse("idem-1");
+        verify(idempotencyService).getCachedResponse(42L, "idem-1");
         verify(bookingService).createBooking(42L, 11L);
-        verify(idempotencyService).saveResponse(eq("idem-1"), any(BookingResponse.class));
+        verify(idempotencyService).saveResponse(eq(42L), eq("idem-1"), any(BookingResponse.class));
     }
 
     @Test
@@ -101,7 +101,7 @@ class BookingControllerWebTest {
         BookingResponse cached = new BookingResponse(100L, 42L, 11L, LocalDateTime.of(2026, 6, 24, 12, 0));
 
         when(jwtUtil.extractUserId("token")).thenReturn(42L);
-        when(idempotencyService.getCachedResponse("idem-1")).thenReturn(Optional.of(cached));
+        when(idempotencyService.getCachedResponse(42L, "idem-1")).thenReturn(Optional.of(cached));
 
         // Act + Assert
         mockMvc.perform(post("/bookings")
@@ -109,15 +109,59 @@ class BookingControllerWebTest {
                         .header("Idempotency-Key", "idem-1")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isOk())
+                .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.bookingId").value(100))
                 .andExpect(jsonPath("$.userId").value(42))
                 .andExpect(jsonPath("$.seatId").value(11))
                 .andExpect(jsonPath("$.bookedAt").value("2026-06-24T12:00:00"));
 
         verify(jwtUtil).extractUserId("token");
-        verify(idempotencyService).getCachedResponse("idem-1");
+        verify(idempotencyService).getCachedResponse(42L, "idem-1");
         verify(bookingService, never()).createBooking(any(), any());
+    }
+
+    @Test
+    void createBooking_shouldNotShareCache_whenDifferentUsersUseSameIdempotencyKey() throws Exception {
+        // Two different users send the SAME Idempotency-Key. Because the key is now
+        // scoped per user, neither sees the other's cached response: user 42's lookup
+        // (keyed by 42) misses and a real booking is created for user 42, and the
+        // cached entry saved is scoped to user 42 — not visible to user 99.
+        BookingRequest request = new BookingRequest();
+        request.setSeatId(11L);
+
+        Booking booking = org.mockito.Mockito.mock(Booking.class);
+        User user = org.mockito.Mockito.mock(User.class);
+        Seat seat = org.mockito.Mockito.mock(Seat.class);
+        LocalDateTime bookedAt = LocalDateTime.of(2026, 6, 24, 12, 0);
+
+        // user 99 already cached a response under the SAME raw key
+        BookingResponse user99Cached = new BookingResponse(500L, 99L, 11L, bookedAt);
+
+        when(jwtUtil.extractUserId("token-42")).thenReturn(42L);
+        when(jwtUtil.extractUserId("token-99")).thenReturn(99L);
+        // per-user scoping: 99's entry exists, 42's does not
+        when(idempotencyService.getCachedResponse(99L, "shared-key")).thenReturn(Optional.of(user99Cached));
+        when(idempotencyService.getCachedResponse(42L, "shared-key")).thenReturn(Optional.empty());
+        when(bookingService.createBooking(42L, 11L)).thenReturn(booking);
+        when(booking.getId()).thenReturn(100L);
+        when(booking.getUser()).thenReturn(user);
+        when(user.getId()).thenReturn(42L);
+        when(booking.getSeat()).thenReturn(seat);
+        when(seat.getId()).thenReturn(11L);
+        when(booking.getBookedAt()).thenReturn(bookedAt);
+
+        // user 42 with the shared key => own fresh booking (201 CREATED), NOT user 99's cached one
+        mockMvc.perform(post("/bookings")
+                        .header("Authorization", "Bearer token-42")
+                        .header("Idempotency-Key", "shared-key")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.bookingId").value(100))
+                .andExpect(jsonPath("$.userId").value(42));
+
+        verify(bookingService).createBooking(42L, 11L);
+        verify(idempotencyService).saveResponse(eq(42L), eq("shared-key"), any(BookingResponse.class));
     }
 
     @Test

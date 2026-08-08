@@ -63,9 +63,20 @@ public class SeatHoldService {
     }
     public String getSeatHolder(Long eventId, Long seatId) {
 
-        String key = "seat_lock:" + eventId + ":" + seatId;
+        try {
 
-        return redisTemplate.opsForValue().get(key);
+            String key = "seat_lock:" + eventId + ":" + seatId;
+
+            return redisTemplate.opsForValue().get(key);
+
+        } catch (Exception e) {
+
+            log.warn(
+                    "Redis unavailable while reading seat holder, failing open (no ownership block): {}",
+                    e.getMessage());
+
+            return null;
+        }
     }
 
 }
