@@ -39,3 +39,6 @@ ticket-booking RoadMap.docx
 .env
 .env.*
 !.env.example
+*.jpeg
+*.jpg
+updated_project2_ticket_booking_roadmap*.txt
