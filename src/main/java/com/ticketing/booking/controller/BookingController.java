@@ -53,12 +53,14 @@ public class BookingController {
 
             Optional<BookingResponse> cached =
                     idempotencyService.getCachedResponse(
+                            userId,
                             idempotencyKey
                     );
 
             if (cached.isPresent()) {
                 log.info("Returning cached booking response for idempotency key: {}", idempotencyKey);
-                return ResponseEntity.ok(cached.get());
+                // Replay must be identical to the original response, which is 201 CREATED.
+                return new ResponseEntity<>(cached.get(), HttpStatus.CREATED);
             }
         }
 
@@ -74,6 +76,7 @@ public class BookingController {
         if (idempotencyKey != null) {
 
             idempotencyService.saveResponse(
+                    userId,
                     idempotencyKey,
                     response
             );

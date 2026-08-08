@@ -1,87 +1,64 @@
 package com.ticketing.booking.service;
 
-import com.ticketing.auth.entity.User;
-import com.ticketing.auth.service.UserService;
 import com.ticketing.booking.entity.Booking;
 import com.ticketing.booking.repository.BookingRepository;
-import com.ticketing.seat.entity.Seat;
-import com.ticketing.seat.entity.SeatStatus;
-import com.ticketing.seat.service.SeatService;
-import com.ticketing.shared.exception.PaymentFailedException;
 import com.ticketing.shared.exception.ResourceNotFoundException;
-import com.ticketing.shared.exception.SeatAlreadyBookedException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import com.ticketing.seat.service.SeatHoldService;
-import com.ticketing.shared.exception.SeatNotHeldByUserException;
-
 
 @Service
-
 public class BookingService {
 
-    private final UserService userService;
-    private final SeatService seatService;
-    private final BookingRepository bookingRepository;
     private final PaymentService paymentService;
-    private final SeatHoldService seatHoldService;
+    private final BookingTransactionService bookingTransactionService;
+    private final BookingRepository bookingRepository;
 
     public BookingService(
-            UserService userService,
-            SeatService seatService,
-            BookingRepository bookingRepository,
             PaymentService paymentService,
-            SeatHoldService seatHoldService) {
+            BookingTransactionService bookingTransactionService,
+            BookingRepository bookingRepository) {
 
-
-        this.userService = userService;
-        this.seatService = seatService;
-        this.bookingRepository = bookingRepository;
         this.paymentService = paymentService;
-        this.seatHoldService = seatHoldService;
+        this.bookingTransactionService = bookingTransactionService;
+        this.bookingRepository = bookingRepository;
     }
 
-    @Transactional
+    /**
+     * Orchestrates the booking flow across three separately-committed steps so
+     * the pessimistic seat lock is NOT held across payment:
+     *
+     * <ol>
+     *   <li>T1 {@code reserveSeat}: lock, validate, mark RESERVED, commit (lock released).</li>
+     *   <li>Payment: runs here with no lock and no open transaction.</li>
+     *   <li>T2 {@code confirmBooking}: re-lock, re-check RESERVED, mark BOOKED, insert booking.</li>
+     * </ol>
+     *
+     * If payment throws, the reserved seat is reverted immediately (a try/finally
+     * so the revert also runs on {@code PaymentServiceUnavailableException});
+     * otherwise the sweeper would eventually reclaim it.
+     *
+     * <p>This method is intentionally NOT {@code @Transactional}: each step above
+     * manages its own transaction via {@link BookingTransactionService}.
+     */
     public Booking createBooking(Long userId, Long seatId) {
 
-        // 1. DB lock — must be first, gives you the seat entity
-        Seat seat = seatService.getSeatWithLock(seatId);
+        // T1 — reserve and release the row lock before touching payment.
+        Long eventId = bookingTransactionService.reserveSeat(userId, seatId);
 
-        // 2. Immediate BOOKED check — return fast, no further work needed
-        if (seat.getStatus() == SeatStatus.BOOKED) {
-            throw new SeatAlreadyBookedException();
+        // Payment — no lock held, no open transaction. process() returns true or
+        // throws (its Resilience4j fallback throws PaymentServiceUnavailableException);
+        // it never returns false, so there is no unreachable "payment failed" branch here.
+        boolean paymentSucceeded = false;
+        try {
+            paymentService.process();
+            paymentSucceeded = true;
+        } finally {
+            if (!paymentSucceeded) {
+                bookingTransactionService.revertSeat(seatId);
+            }
         }
 
-        // 3. Redis ownership check — needs eventId from seat
-        Long eventId = seat.getEvent().getId();
-        String holder = seatHoldService.getSeatHolder(eventId, seatId);
-        if (holder != null && !holder.equals(userId.toString())) {
-            throw new SeatNotHeldByUserException("Seat is held by another user");
-        }
-
-        // 4. Payment
-        boolean paid = paymentService.process();
-        if (!paid) {
-            throw new PaymentFailedException();
-        }
-
-        // 5. All checks passed — do the actual work
-        User user = userService.getUserEntityById(userId);
-        seat.setStatus(SeatStatus.BOOKED);
-
-        Booking booking = new Booking();
-        booking.setUser(user);
-        booking.setSeat(seat);
-
-        Booking saved = bookingRepository.save(booking);  // if this throws, nothing below runs
-
-        // 6. Release Redis ONLY after save succeeds
-        seatHoldService.releaseSeat(
-                eventId,
-                seatId
-        );
-
-        return saved;
+        // T2 — confirm in a fresh transaction, re-checking the reservation holds.
+        return bookingTransactionService.confirmBooking(userId, seatId, eventId);
     }
 
     public Booking getBookingById(Long bookingId) {

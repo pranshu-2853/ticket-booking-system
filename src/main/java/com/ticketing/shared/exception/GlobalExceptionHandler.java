@@ -132,6 +132,34 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(error, HttpStatus.CONFLICT);
     }
 
+    @ExceptionHandler(SeatAlreadyReservedException.class)
+    public ResponseEntity<ApiError> handleSeatAlreadyReserved(
+            SeatAlreadyReservedException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.CONFLICT.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(SeatReservationLostException.class)
+    public ResponseEntity<ApiError> handleSeatReservationLost(
+            SeatReservationLostException ex,
+            HttpServletRequest request) {
+
+        ApiError error = new ApiError(
+                ex.getMessage(),
+                HttpStatus.CONFLICT.value(),
+                request.getRequestURI()
+        );
+
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
     @ExceptionHandler(PaymentFailedException.class)
     public ResponseEntity<ApiError> handlePaymentFailed(
             PaymentFailedException ex,
