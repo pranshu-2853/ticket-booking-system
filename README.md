@@ -270,11 +270,13 @@ A crash, a killed pod, or a lost connection between T1 and T2 leaves a seat `RES
 
 ```mermaid
 flowchart LR
-    S["@Scheduled sweeper"] --> Q["UPDATE seats<br/>SET status = 'AVAILABLE'<br/>WHERE status = 'RESERVED'<br/>AND reserved_until &lt; now()"]
+    S["@Scheduled sweeper<br/><i>every 60s</i>"] --> Q["UPDATE seats<br/>SET status = 'AVAILABLE'<br/>WHERE status = 'RESERVED'<br/>AND reserved_until &lt; now()"]
     Q --> R["rows reclaimed"]
 
     style S fill:#8250df,color:#fff
 ```
+
+A seat holds `RESERVED` for **two minutes** (`RESERVATION_WINDOW`) before becoming eligible for reclaim, and the sweeper runs every **60 seconds** by default (`reservation.sweeper.fixed-delay-ms`). A stranded reservation therefore returns to `AVAILABLE` within roughly two to three minutes. The window has to comfortably exceed the worst-case payment path — three retry attempts a second apart — or the sweeper would reclaim seats out from under callers still waiting on payment.
 
 The reclaim is a **single conditional UPDATE**. That matters for the race against T2: the `WHERE` clause takes the row lock and re-evaluates the status in the same atomic statement, so the sweeper cannot reclaim a seat that T2 has already moved to `BOOKED`. The other direction is covered by T2's post-lock status assertion. Between the two, every ordering of the race resolves safely:
 
@@ -300,15 +302,15 @@ Tools:    ExecutorService + CountDownLatch(1)
 
 <img width="1442" height="857" alt="Concurrency test output" src="https://github.com/user-attachments/assets/cd9fd383-81c2-41ec-851e-37c40f6480b4" />
 
-The restructure changed *how* the losing threads fail, which is a more interesting result than the count. With one user holding the seat and eight threads (the holder plus seven others) booking at once:
+The restructure changed *how* the losing threads fail, which is a more interesting result than the count. With one user holding the seat and eight threads (the holder plus seven others) booking at once, measured across three repetitions with payment stubbed:
 
 | Rejection reason | Single-transaction flow | Reserve-then-pay flow |
 |---|---|---|
-| `SeatAlreadyBookedException` | ~81% | ~0% |
-| `SeatAlreadyReservedException` | — | ~43% |
-| `SeatNotHeldByUserException` | ~19% | ~57% |
+| `SeatAlreadyBookedException` | 81% (17/21) | ~0% |
+| `SeatAlreadyReservedException` | — | 81% (17/21) |
+| `SeatNotHeldByUserException` | 19% (4/21) | 19% (4/21) |
 
-In the old flow the winner held the lock all the way through `BOOKED` and commit, so contenders queued behind that commit and saw a booked seat — the hold-ownership check was almost never reached. Now T1 flips only to `RESERVED` and releases immediately, so contenders reach the ownership check while the seat is still contended. The hold check went from nearly unreachable to the most common rejection path.
+In the old flow the winner held the lock all the way through `BOOKED` and commit, so contenders queued behind that commit and saw a booked seat — and in the highest-contention repetition the hold-ownership check was not reached at all. Now T1 flips only to `RESERVED` and releases immediately, so `BOOKED` is never what a contender sees; they hit the `RESERVED` guard instead. The hold check remains the minority path, but it is now reached consistently rather than intermittently skipped, because the window in which a contender can acquire the lock before the holder is no longer collapsed by a long-held commit.
 
 ---
 
@@ -518,7 +520,7 @@ Schema is version-controlled through Flyway, `V1` to `V7`. `V7` adds the nullabl
 | Seat held by a different user             | `SeatNotHeldByUserException` → 409                                    |
 | Payment fails after retries               | Reservation reverted in `finally`; seat returns to `AVAILABLE`        |
 | Payment service degraded                  | Circuit breaker opens, fallback throws immediately without waiting    |
-| Process dies between reserve and confirm  | Sweeper reclaims the seat once `reserved_until` elapses               |
+| Process dies between reserve and confirm  | Sweeper reclaims the seat once `reserved_until` elapses (~2–3 min)    |
 | Sweeper reclaims during confirm           | T2's post-lock status check aborts with `SeatReservationLostException`|
 | Redis unavailable                         | Holds and idempotency degrade silently; bookings continue             |
 | Seat hold expires                         | Redis TTL removes the key after 5 minutes                             |
@@ -530,6 +532,7 @@ Schema is version-controlled through Flyway, `V1` to `V7`. `V7` adds the nullabl
 ## Testing
 
 ```bash
+docker compose up -d
 mvn clean test
 ```
 
@@ -544,7 +547,7 @@ Resilience tests        — retry attempt counting, fallback behaviour
 Exception handler tests — every custom exception mapping
 ```
 
-**The suite runs against an empty database.** Integration tests extend a shared base that seeds its own event, seats, and users in `@BeforeEach` rather than depending on pre-existing rows. Verified by running the full suite against a freshly created database with only Flyway migrations applied — 99 passing.
+**The suite runs against an empty database.** Integration tests extend a shared base that seeds its own event, seats, and users in `@BeforeEach` rather than depending on pre-existing rows. Verified by running the full suite against a freshly created database with only Flyway migrations applied — 99 passing. Postgres and Redis must be running (`docker compose up -d`); the concurrency tests exercise real row locking rather than mocking it out.
 
 An earlier version of the suite hardcoded seat and user IDs that existed only in a local Docker volume. It passed on the machine it was written on and would have failed on every clone. Self-seeding fixtures are the fix; the lesson is that a green suite proves nothing about a suite you have never run somewhere else.
 
@@ -561,6 +564,8 @@ These are real. They are listed because a design document that admits nothing is
 - **`releaseSeat` deletes the hold unconditionally.** It takes only `(eventId, seatId)` and issues a bare `DEL` with no ownership check. Correct release needs a compare-and-delete — a Lua script or a fencing token — which is also what a hold would need before it could be trusted for anything beyond UX.
 
 - **No heartbeat on holds.** The five-minute TTL is set once and never extended. A user who takes longer than that loses the hold silently, and the booking then succeeds anyway because the hold is advisory.
+
+- **The reservation window is a hardcoded two minutes.** It has to exceed the slowest payment path, which today is a known constant. A real gateway with variable latency would want the window derived from a request timeout rather than fixed.
 
 - **Idempotency does not cover simultaneous duplicates.** Discussed [above](#idempotency). Needs an in-flight marker written before processing.
 
@@ -609,14 +614,14 @@ Flyway builds the schema on startup and seeds demo data. The test suite seeds it
 ### Environment variables
 
 ```env
-DB_URL=jdbc:postgresql://localhost:5432/ticketdb
+DB_URL=jdbc:postgresql://localhost:5332/ticketdb
 DB_USER=postgres
 DB_PASS=postgres
 REDIS_HOST=localhost
 JWT_SECRET=your-secret-key
 ```
 
-See `.env.example` for the full list.
+Postgres is published on host port **5332** (`docker-compose.yml` maps `5332:5432`) so it does not clash with a local Postgres install. See `.env.example` for the full list.
 
 ### Swagger access
 
