@@ -1,21 +1,13 @@
 package com.ticketing.booking.service;
 
-import com.ticketing.auth.entity.User;
-import com.ticketing.auth.service.UserService;
 import com.ticketing.booking.entity.Booking;
 import com.ticketing.booking.repository.BookingRepository;
-import com.ticketing.event.entity.Event;
-import com.ticketing.seat.entity.Seat;
-import com.ticketing.seat.entity.SeatStatus;
-import com.ticketing.seat.service.SeatHoldService;
-import com.ticketing.seat.service.SeatService;
-import com.ticketing.shared.exception.PaymentFailedException;
+import com.ticketing.shared.exception.PaymentServiceUnavailableException;
 import com.ticketing.shared.exception.ResourceNotFoundException;
-import com.ticketing.shared.exception.SeatAlreadyBookedException;
-import com.ticketing.shared.exception.SeatNotHeldByUserException;
+import com.ticketing.shared.exception.SeatAlreadyReservedException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -26,162 +18,97 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * BookingService is now a pure orchestrator over three separately-committed
+ * steps in BookingTransactionService, with payment in between. These tests pin
+ * down that orchestration: ordering, and that a payment failure reverts the
+ * reservation before propagating.
+ */
 @ExtendWith(MockitoExtension.class)
 class BookingServiceTest {
-
-    @Mock
-    private UserService userService;
-
-    @Mock
-    private SeatService seatService;
-
-    @Mock
-    private BookingRepository bookingRepository;
 
     @Mock
     private PaymentService paymentService;
 
     @Mock
-    private SeatHoldService seatHoldService;
+    private BookingTransactionService bookingTransactionService;
+
+    @Mock
+    private BookingRepository bookingRepository;
 
     @InjectMocks
     private BookingService bookingService;
 
     @Test
-    void createBooking_shouldCreateBookingAndReleaseSeatHold_whenValidRequest() {
+    void createBooking_shouldReserveThenPayThenConfirm_onHappyPath() {
         // Arrange
         Long userId = 101L;
         Long seatId = 201L;
         Long eventId = 301L;
+        Booking confirmed = new Booking();
 
-        Seat seat = buildSeat(SeatStatus.AVAILABLE, eventId);
-        User user = org.mockito.Mockito.mock(User.class);
-        Booking savedBooking = new Booking();
-
-        when(seatService.getSeatWithLock(seatId)).thenReturn(seat);
-        when(seatHoldService.getSeatHolder(eventId, seatId)).thenReturn(userId.toString());
+        when(bookingTransactionService.reserveSeat(userId, seatId)).thenReturn(eventId);
         when(paymentService.process()).thenReturn(true);
-        when(userService.getUserEntityById(userId)).thenReturn(user);
-        when(bookingRepository.save(any(Booking.class))).thenReturn(savedBooking);
+        when(bookingTransactionService.confirmBooking(userId, seatId, eventId)).thenReturn(confirmed);
 
         // Act
         Booking result = bookingService.createBooking(userId, seatId);
 
         // Assert
-        assertSame(savedBooking, result);
-        assertEquals(SeatStatus.BOOKED, seat.getStatus());
+        assertSame(confirmed, result);
 
-        ArgumentCaptor<Booking> bookingCaptor = ArgumentCaptor.forClass(Booking.class);
-        verify(bookingRepository).save(bookingCaptor.capture());
-        assertSame(user, bookingCaptor.getValue().getUser());
-        assertSame(seat, bookingCaptor.getValue().getSeat());
+        InOrder order = inOrder(bookingTransactionService, paymentService);
+        order.verify(bookingTransactionService).reserveSeat(userId, seatId);
+        order.verify(paymentService).process();
+        order.verify(bookingTransactionService).confirmBooking(userId, seatId, eventId);
 
-        inOrder(bookingRepository, seatHoldService)
-                .verify(bookingRepository)
-                .save(any(Booking.class));
-        inOrder(bookingRepository, seatHoldService)
-                .verify(seatHoldService)
-                .releaseSeat(eventId, seatId);
+        verify(bookingTransactionService, never()).revertSeat(seatId);
     }
 
     @Test
-    void createBooking_shouldThrowSeatAlreadyBooked_whenSeatAlreadyBooked() {
-        // Arrange
-        Long userId = 101L;
-        Long seatId = 201L;
-
-        Seat seat = buildSeat(SeatStatus.BOOKED, 301L);
-        when(seatService.getSeatWithLock(seatId)).thenReturn(seat);
-
-        // Act
-        assertThrows(SeatAlreadyBookedException.class, () -> bookingService.createBooking(userId, seatId));
-
-        // Assert
-        verify(seatHoldService, never()).getSeatHolder(any(), any());
-        verifyNoInteractions(paymentService, userService, bookingRepository);
-        verify(seatHoldService, never()).releaseSeat(any(), any());
-    }
-
-    @Test
-    void createBooking_shouldThrowPaymentFailed_whenPaymentReturnsFalse() {
+    void createBooking_shouldRevertReservation_whenPaymentThrows() {
         // Arrange
         Long userId = 101L;
         Long seatId = 201L;
         Long eventId = 301L;
 
-        Seat seat = buildSeat(SeatStatus.AVAILABLE, eventId);
-        when(seatService.getSeatWithLock(seatId)).thenReturn(seat);
-        when(seatHoldService.getSeatHolder(eventId, seatId)).thenReturn(userId.toString());
-        when(paymentService.process()).thenReturn(false);
+        when(bookingTransactionService.reserveSeat(userId, seatId)).thenReturn(eventId);
+        doThrow(new PaymentServiceUnavailableException("payment down"))
+                .when(paymentService).process();
 
         // Act
-        assertThrows(PaymentFailedException.class, () -> bookingService.createBooking(userId, seatId));
+        assertThrows(PaymentServiceUnavailableException.class,
+                () -> bookingService.createBooking(userId, seatId));
 
-        // Assert
-        assertEquals(SeatStatus.AVAILABLE, seat.getStatus());
-        verifyNoInteractions(userService, bookingRepository);
-        verify(seatHoldService, never()).releaseSeat(any(), any());
+        // Assert — reservation freed, confirm never attempted
+        verify(bookingTransactionService).revertSeat(seatId);
+        verify(bookingTransactionService, never()).confirmBooking(userId, seatId, eventId);
     }
 
     @Test
-    void createBooking_shouldThrowSeatNotHeldByUser_whenSeatIsHeldByAnotherUser() {
-        // Arrange
-        Long userId = 101L;
-        Long seatId = 201L;
-        Long eventId = 301L;
-
-        Seat seat = buildSeat(SeatStatus.AVAILABLE, eventId);
-        when(seatService.getSeatWithLock(seatId)).thenReturn(seat);
-        when(seatHoldService.getSeatHolder(eventId, seatId)).thenReturn("999");
-
-        // Act
-        assertThrows(SeatNotHeldByUserException.class, () -> bookingService.createBooking(userId, seatId));
-
-        // Assert
-        verifyNoInteractions(paymentService, userService, bookingRepository);
-        verify(seatHoldService, never()).releaseSeat(any(), any());
-    }
-
-    @Test
-    void createBooking_shouldThrowResourceNotFound_whenSeatDoesNotExist() {
+    void createBooking_shouldNotPayOrConfirm_whenReserveThrows() {
         // Arrange
         Long userId = 101L;
         Long seatId = 201L;
 
-        when(seatService.getSeatWithLock(seatId)).thenThrow(new ResourceNotFoundException("Seat not found"));
+        when(bookingTransactionService.reserveSeat(userId, seatId))
+                .thenThrow(new SeatAlreadyReservedException("already reserved"));
 
         // Act
-        assertThrows(ResourceNotFoundException.class, () -> bookingService.createBooking(userId, seatId));
+        assertThrows(SeatAlreadyReservedException.class,
+                () -> bookingService.createBooking(userId, seatId));
 
-        // Assert
-        verifyNoInteractions(seatHoldService, paymentService, userService, bookingRepository);
-    }
-
-    @Test
-    void createBooking_shouldThrowResourceNotFound_whenUserDoesNotExist() {
-        // Arrange
-        Long userId = 101L;
-        Long seatId = 201L;
-        Long eventId = 301L;
-
-        Seat seat = buildSeat(SeatStatus.AVAILABLE, eventId);
-        when(seatService.getSeatWithLock(seatId)).thenReturn(seat);
-        when(seatHoldService.getSeatHolder(eventId, seatId)).thenReturn(null);
-        when(paymentService.process()).thenReturn(true);
-        when(userService.getUserEntityById(userId)).thenThrow(new ResourceNotFoundException("User not found"));
-
-        // Act
-        assertThrows(ResourceNotFoundException.class, () -> bookingService.createBooking(userId, seatId));
-
-        // Assert
-        verify(bookingRepository, never()).save(any(Booking.class));
-        verify(seatHoldService, never()).releaseSeat(any(), any());
+        // Assert — no payment, no confirm, no revert (nothing was reserved by us)
+        verifyNoInteractions(paymentService);
+        verify(bookingTransactionService, never()).confirmBooking(any(), any(), any());
+        verify(bookingTransactionService, never()).revertSeat(any());
     }
 
     @Test
@@ -214,15 +141,5 @@ class BookingServiceTest {
         // Assert
         assertEquals("Booking not found with id: " + bookingId, ex.getMessage());
         verify(bookingRepository).findById(bookingId);
-    }
-
-    private Seat buildSeat(SeatStatus status, Long eventId) {
-        Event event = new Event();
-        event.setId(eventId);
-
-        Seat seat = new Seat();
-        seat.setStatus(status);
-        seat.setEvent(event);
-        return seat;
     }
 }

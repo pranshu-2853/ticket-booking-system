@@ -1,109 +1,83 @@
 package com.ticketing.booking;
 
-import com.ticketing.booking.repository.BookingRepository;
+import com.ticketing.auth.entity.User;
 import com.ticketing.booking.service.BookingService;
+import com.ticketing.booking.service.PaymentService;
+import com.ticketing.booking.support.AbstractBookingIntegrationTest;
+import com.ticketing.event.entity.Event;
 import com.ticketing.seat.entity.Seat;
-import com.ticketing.seat.entity.SeatStatus;
-import com.ticketing.seat.repository.SeatRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-
-import org.springframework.test.context.ActiveProfiles;
+import org.springframework.boot.test.mock.mockito.MockBean;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.when;
 
-@SpringBootTest
-@ActiveProfiles("test")
-class BookingConcurrencySafetyNetTest {
+/**
+ * Safety-net duplicate of {@link ConcurrencyTest}: 8 users, same seat, exactly
+ * one booking. Kept as an independent guard on the concurrency invariant.
+ */
+class BookingConcurrencySafetyNetTest extends AbstractBookingIntegrationTest {
 
     @Autowired
     private BookingService bookingService;
 
-    @Autowired
-    private BookingRepository bookingRepository;
+    @MockBean
+    private PaymentService paymentService;
 
-    @Autowired
-    private SeatRepository seatRepository;
-
-    private static final Long SEAT_ID = 11L;
-
-    private static final Long[] USER_IDS = {
-            1L, 2L, 3L, 6L, 7L, 8L, 9L, 10L
-    };
+    private Long seatId;
+    private Long[] userIds;
 
     @BeforeEach
-    void cleanUp() {
+    void setUp() {
+        when(paymentService.process()).thenReturn(true);
 
-        bookingRepository.deleteAll();
+        Event event = createEvent();
+        Seat seat = createSeat(event);
+        seatId = seat.getId();
 
-        Seat seat = seatRepository.findById(SEAT_ID)
-                .orElseThrow();
-
-        seat.setStatus(SeatStatus.AVAILABLE);
-
-        seatRepository.saveAndFlush(seat);
+        List<User> users = createUsers(8);
+        userIds = users.stream().map(User::getId).toArray(Long[]::new);
     }
 
     @RepeatedTest(3)
-    void onlyOneBookingShouldBeCreatedUnderConcurrentRequests()
-            throws Exception {
+    void onlyOneBookingShouldBeCreatedUnderConcurrentRequests() throws Exception {
 
         int threadCount = 8;
-
-        ExecutorService executor =
-                Executors.newFixedThreadPool(threadCount);
-
-        CountDownLatch latch =
-                new CountDownLatch(1);
-
-        List<Future<?>> futures =
-                new ArrayList<>();
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch latch = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
 
         for (int i = 0; i < threadCount; i++) {
-
-            Long userId = USER_IDS[i];
-
-            futures.add(
-                    executor.submit(() -> {
-
-                        try {
-
-                            latch.await();
-
-                            bookingService.createBooking(
-                                    userId,
-                                    SEAT_ID
-                            );
-
-                        } catch (Exception ignored) {
-                        }
-
-                        return null;
-                    })
-            );
+            Long userId = userIds[i];
+            futures.add(executor.submit(() -> {
+                try {
+                    latch.await();
+                    bookingService.createBooking(userId, seatId);
+                } catch (Exception ignored) {
+                }
+                return null;
+            }));
         }
 
         latch.countDown();
-
         for (Future<?> future : futures) {
             try {
                 future.get();
             } catch (Exception ignored) {
             }
         }
-
         executor.shutdown();
 
-        long bookingCount =
-                bookingRepository.countBySeatId(SEAT_ID);
-
-        assertThat(bookingCount)
-                .isEqualTo(1);
+        long bookingCount = bookingRepository.countBySeatId(seatId);
+        assertThat(bookingCount).isEqualTo(1);
     }
 }
