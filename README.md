@@ -2,15 +2,19 @@
 
 A production-style backend built around one question: **when hundreds of people hit "Book" on the same seat at the same millisecond, how do you guarantee exactly one of them gets it — without serializing everyone behind a payment call?**
 
-Spring Boot 3, PostgreSQL, and Redis. Reserve-then-pay booking flow, row-level pessimistic locking, a scheduled reclaimer for abandoned reservations, JWT authentication, circuit breaker and retry on payment, per-user idempotency keys, and Flyway-managed migrations. Deployed on Railway.
+Spring Boot 3, PostgreSQL, and Redis. Reserve-then-pay booking flow, row-level pessimistic locking, a scheduled reclaimer for abandoned reservations, JWT authentication, circuit breaker and retry on payment, per-user idempotency keys, and Flyway-managed migrations.
+
+**Production deployment:** Dockerized Spring Boot application on Render, PostgreSQL on Neon, and Redis on Upstash.
 
 ---
 
 ## Live Demo
 
-**Base URL:** `https://ticket-booking-system.up.railway.app`
+**Base URL:** `https://ticket-booking-system-stkb.onrender.com`
 
-**Swagger UI:** `https://ticket-booking-system.up.railway.app/swagger-ui/index.html`
+**Swagger UI:** `https://ticket-booking-system-stkb.onrender.com/swagger-ui/index.html`
+
+> The production API is authenticated. Log in through `/auth/login` first and use the returned access token for secured endpoints.
 
 | Role  | Email           | Password |
 |-------|-----------------|----------|
@@ -243,7 +247,7 @@ Independent of every application-level mechanism. Whatever happens with locks, s
 A user can hold a seat for five minutes before confirming:
 
 ```
-POST /seats/hold
+POST /events/hold
   → SET seat_lock:{eventId}:{seatId}  {userId}  NX PX 300000
 ```
 
@@ -259,6 +263,8 @@ if (holder != null && !holder.equals(userId.toString())) {
 ```
 
 A seat with no hold books fine. The hold's purpose is to stop wasted work — it lets a user fill in details knowing the seat is unlikely to vanish — not to gate the booking. Correctness comes from the lock, the `RESERVED` status, and the unique constraint. Treating a five-minute Redis key with no fencing token as a correctness mechanism would be a mistake.
+
+The production Redis connection uses Upstash over TLS. The same Redis hold implementation is used locally and in production; only the connection settings change through environment variables.
 
 **Redis failures fail open.** `tryHoldSeat` returns `true` on a Redis exception (the caller proceeds without a real hold); `getSeatHolder` returns `null` (the ownership check is skipped); `releaseSeat` and the idempotency reads and writes swallow their errors. Redis being down degrades the experience — concurrent holders no longer get an early 409, idempotency stops replaying — but it does not stop bookings, and it cannot cause a double booking.
 
@@ -493,13 +499,11 @@ Schema is version-controlled through Flyway, `V1` to `V7`. `V7` adds the nullabl
 
 ### Seats
 
-| Method | Endpoint                         | Auth   | Description             |
-|--------|----------------------------------|--------|-------------------------|
-| POST   | /seats                           | Admin  | Add seat to event       |
-| GET    | /seats/{id}                      | Bearer | Get seat by ID          |
-| GET    | /seats/event/{eventId}           | Bearer | List seats for event    |
-| GET    | /seats/event/{eventId}/available | Bearer | List available seats    |
-| POST   | /seats/hold                      | Bearer | Hold seat for 5 minutes |
+| Method | Endpoint                  | Auth   | Description             |
+|--------|---------------------------|--------|-------------------------|
+| POST   | /events/{eventId}/seats  | Admin  | Add seat to event       |
+| GET    | /events/{eventId}/seats  | Bearer | List seats for event    |
+| POST   | /events/hold             | Bearer | Hold seat for 5 minutes |
 
 ### Bookings
 
@@ -593,7 +597,9 @@ These are real. They are listed because a design document that admits nothing is
 | Testing          | JUnit 5, Mockito, ExecutorService |
 | Build            | Maven                       |
 | Containerization | Docker                      |
-| Deployment       | Railway                     |
+| Deployment       | Render                      |
+| Production DB    | Neon PostgreSQL             |
+| Production Redis | Upstash Redis               |
 
 ---
 
@@ -616,12 +622,15 @@ Flyway builds the schema on startup and seeds demo data. The test suite seeds it
 ```env
 DB_URL=jdbc:postgresql://localhost:5332/ticketdb
 DB_USER=postgres
-DB_PASS=postgres
+DB_PASSWORD=your-local-db-password
 REDIS_HOST=localhost
+REDIS_PORT=6380
+REDIS_PASSWORD=
+REDIS_SSL_ENABLED=false
 JWT_SECRET=your-secret-key
 ```
 
-Postgres is published on host port **5332** (`docker-compose.yml` maps `5332:5432`) so it does not clash with a local Postgres install. See `.env.example` for the full list.
+Postgres is published on host port **5332** (`docker-compose.yml` maps `5332:5432`) so it does not clash with a local Postgres install. Redis uses the corresponding host-mapped port from the local Docker Compose setup. See `.env.example` for the full list.
 
 ### Swagger access
 
@@ -634,10 +643,68 @@ Postgres is published on host port **5332** (`docker-compose.yml` maps `5332:543
 
 ## Production Deployment
 
-Deployed on Railway: Spring Boot service, PostgreSQL, Redis, Flyway migrations, Docker build pipeline.
+The application is deployed as a Dockerized Spring Boot web service on Render.
 
-- App: https://ticket-booking-system.up.railway.app
-- Swagger: https://ticket-booking-system.up.railway.app/swagger-ui/index.html
+### Production infrastructure
+
+- **Application:** Spring Boot 3.x running in Docker on Render
+- **Database:** PostgreSQL on Neon
+- **Redis:** Upstash Redis
+- **Database migrations:** Flyway
+- **Authentication:** JWT
+- **Configuration:** Environment variables
+- **Container build:** Dockerfile
+
+### Production architecture
+
+```text
+                         ┌──────────────────────┐
+                         │   Neon PostgreSQL     │
+                         │   source of truth     │
+                         └──────────▲───────────┘
+                                    │
+Client ───── HTTPS ──────> Render ──┤
+                           Spring   │
+                           Boot     │
+                           Docker   │
+                                    │
+                         ┌──────────▼───────────┐
+                         │     Upstash Redis     │
+                         │ seat holds + idempotency │
+                         └───────────────────────┘
+```
+
+The Dockerfile is used to build and run the Spring Boot application. Docker Compose remains a local-development setup for PostgreSQL and Redis; those local containers are not deployed to Render.
+
+### Production environment variables
+
+The application reads production configuration from environment variables rather than storing credentials in `application.properties`:
+
+```text
+DB_URL
+DB_USER
+DB_PASSWORD
+
+REDIS_HOST
+REDIS_PORT
+REDIS_PASSWORD
+REDIS_SSL_ENABLED
+
+JWT_SECRET
+```
+
+Render provides the `PORT` environment variable automatically. The application uses:
+
+```properties
+server.port=${PORT:8080}
+```
+
+so local development falls back to port `8080`, while the deployed application listens on Render's assigned port.
+
+### Live endpoints
+
+- **App:** https://ticket-booking-system-stkb.onrender.com
+- **Swagger:** https://ticket-booking-system-stkb.onrender.com/swagger-ui/index.html
 
 ---
 
