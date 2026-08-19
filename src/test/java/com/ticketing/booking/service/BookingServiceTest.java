@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 class BookingServiceTest {
 
     @Mock
-    private PaymentService paymentService;
+    private IdempotentPaymentService idempotentPaymentService;
 
     @Mock
     private BookingTransactionService bookingTransactionService;
@@ -52,21 +52,22 @@ class BookingServiceTest {
         Long userId = 101L;
         Long seatId = 201L;
         Long eventId = 301L;
+        String paymentKey = "101:idem-1";
         Booking confirmed = new Booking();
 
         when(bookingTransactionService.reserveSeat(userId, seatId)).thenReturn(eventId);
-        when(paymentService.process()).thenReturn(true);
+        when(idempotentPaymentService.pay(paymentKey, userId, seatId)).thenReturn(true);
         when(bookingTransactionService.confirmBooking(userId, seatId, eventId)).thenReturn(confirmed);
 
         // Act
-        Booking result = bookingService.createBooking(userId, seatId);
+        Booking result = bookingService.createBooking(userId, seatId, paymentKey);
 
         // Assert
         assertSame(confirmed, result);
 
-        InOrder order = inOrder(bookingTransactionService, paymentService);
+        InOrder order = inOrder(bookingTransactionService, idempotentPaymentService);
         order.verify(bookingTransactionService).reserveSeat(userId, seatId);
-        order.verify(paymentService).process();
+        order.verify(idempotentPaymentService).pay(paymentKey, userId, seatId);
         order.verify(bookingTransactionService).confirmBooking(userId, seatId, eventId);
 
         verify(bookingTransactionService, never()).revertSeat(seatId);
@@ -78,14 +79,15 @@ class BookingServiceTest {
         Long userId = 101L;
         Long seatId = 201L;
         Long eventId = 301L;
+        String paymentKey = "101:idem-1";
 
         when(bookingTransactionService.reserveSeat(userId, seatId)).thenReturn(eventId);
         doThrow(new PaymentServiceUnavailableException("payment down"))
-                .when(paymentService).process();
+                .when(idempotentPaymentService).pay(paymentKey, userId, seatId);
 
         // Act
         assertThrows(PaymentServiceUnavailableException.class,
-                () -> bookingService.createBooking(userId, seatId));
+                () -> bookingService.createBooking(userId, seatId, paymentKey));
 
         // Assert — reservation freed, confirm never attempted
         verify(bookingTransactionService).revertSeat(seatId);
@@ -97,16 +99,17 @@ class BookingServiceTest {
         // Arrange
         Long userId = 101L;
         Long seatId = 201L;
+        String paymentKey = "101:idem-1";
 
         when(bookingTransactionService.reserveSeat(userId, seatId))
                 .thenThrow(new SeatAlreadyReservedException("already reserved"));
 
         // Act
         assertThrows(SeatAlreadyReservedException.class,
-                () -> bookingService.createBooking(userId, seatId));
+                () -> bookingService.createBooking(userId, seatId, paymentKey));
 
         // Assert — no payment, no confirm, no revert (nothing was reserved by us)
-        verifyNoInteractions(paymentService);
+        verifyNoInteractions(idempotentPaymentService);
         verify(bookingTransactionService, never()).confirmBooking(any(), any(), any());
         verify(bookingTransactionService, never()).revertSeat(any());
     }

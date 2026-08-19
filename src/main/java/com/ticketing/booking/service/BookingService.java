@@ -8,16 +8,16 @@ import org.springframework.stereotype.Service;
 @Service
 public class BookingService {
 
-    private final PaymentService paymentService;
+    private final IdempotentPaymentService idempotentPaymentService;
     private final BookingTransactionService bookingTransactionService;
     private final BookingRepository bookingRepository;
 
     public BookingService(
-            PaymentService paymentService,
+            IdempotentPaymentService idempotentPaymentService,
             BookingTransactionService bookingTransactionService,
             BookingRepository bookingRepository) {
 
-        this.paymentService = paymentService;
+        this.idempotentPaymentService = idempotentPaymentService;
         this.bookingTransactionService = bookingTransactionService;
         this.bookingRepository = bookingRepository;
     }
@@ -28,7 +28,8 @@ public class BookingService {
      *
      * <ol>
      *   <li>T1 {@code reserveSeat}: lock, validate, mark RESERVED, commit (lock released).</li>
-     *   <li>Payment: runs here with no lock and no open transaction.</li>
+     *   <li>Payment: runs here with no lock and no open transaction, now made durably
+     *       idempotent via {@link IdempotentPaymentService} keyed by {@code paymentKey}.</li>
      *   <li>T2 {@code confirmBooking}: re-lock, re-check RESERVED, mark BOOKED, insert booking.</li>
      * </ol>
      *
@@ -37,19 +38,23 @@ public class BookingService {
      * otherwise the sweeper would eventually reclaim it.
      *
      * <p>This method is intentionally NOT {@code @Transactional}: each step above
-     * manages its own transaction via {@link BookingTransactionService}.
+     * manages its own transaction via {@link BookingTransactionService} /
+     * {@link IdempotentPaymentService}.
+     *
+     * @param paymentKey the payment idempotency key, derived by the controller from
+     *                   the booking Idempotency-Key so it is stable across retries.
      */
-    public Booking createBooking(Long userId, Long seatId) {
+    public Booking createBooking(Long userId, Long seatId, String paymentKey) {
 
         // T1 — reserve and release the row lock before touching payment.
         Long eventId = bookingTransactionService.reserveSeat(userId, seatId);
 
-        // Payment — no lock held, no open transaction. process() returns true or
-        // throws (its Resilience4j fallback throws PaymentServiceUnavailableException);
-        // it never returns false, so there is no unreachable "payment failed" branch here.
+        // Payment — no lock held, no open transaction. Durably idempotent per
+        // paymentKey; returns true on success or throws (its Resilience4j fallback
+        // throws PaymentServiceUnavailableException).
         boolean paymentSucceeded = false;
         try {
-            paymentService.process();
+            idempotentPaymentService.pay(paymentKey, userId, seatId);
             paymentSucceeded = true;
         } finally {
             if (!paymentSucceeded) {

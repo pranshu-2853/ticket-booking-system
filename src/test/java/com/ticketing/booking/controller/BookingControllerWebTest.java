@@ -67,7 +67,7 @@ class BookingControllerWebTest {
 
         when(jwtUtil.extractUserId("token")).thenReturn(42L);
         when(idempotencyService.getCachedResponse(42L, "idem-1")).thenReturn(Optional.empty());
-        when(bookingService.createBooking(42L, 11L)).thenReturn(booking);
+        when(bookingService.createBooking(eq(42L), eq(11L), any())).thenReturn(booking);
         when(booking.getId()).thenReturn(100L);
         when(booking.getUser()).thenReturn(user);
         when(user.getId()).thenReturn(42L);
@@ -89,7 +89,7 @@ class BookingControllerWebTest {
 
         verify(jwtUtil).extractUserId("token");
         verify(idempotencyService).getCachedResponse(42L, "idem-1");
-        verify(bookingService).createBooking(42L, 11L);
+        verify(bookingService).createBooking(eq(42L), eq(11L), any());
         verify(idempotencyService).saveResponse(eq(42L), eq("idem-1"), any(BookingResponse.class));
     }
 
@@ -117,7 +117,7 @@ class BookingControllerWebTest {
 
         verify(jwtUtil).extractUserId("token");
         verify(idempotencyService).getCachedResponse(42L, "idem-1");
-        verify(bookingService, never()).createBooking(any(), any());
+        verify(bookingService, never()).createBooking(any(), any(), any());
     }
 
     @Test
@@ -142,7 +142,7 @@ class BookingControllerWebTest {
         // per-user scoping: 99's entry exists, 42's does not
         when(idempotencyService.getCachedResponse(99L, "shared-key")).thenReturn(Optional.of(user99Cached));
         when(idempotencyService.getCachedResponse(42L, "shared-key")).thenReturn(Optional.empty());
-        when(bookingService.createBooking(42L, 11L)).thenReturn(booking);
+        when(bookingService.createBooking(eq(42L), eq(11L), any())).thenReturn(booking);
         when(booking.getId()).thenReturn(100L);
         when(booking.getUser()).thenReturn(user);
         when(user.getId()).thenReturn(42L);
@@ -160,7 +160,7 @@ class BookingControllerWebTest {
                 .andExpect(jsonPath("$.bookingId").value(100))
                 .andExpect(jsonPath("$.userId").value(42));
 
-        verify(bookingService).createBooking(42L, 11L);
+        verify(bookingService).createBooking(eq(42L), eq(11L), any());
         verify(idempotencyService).saveResponse(eq(42L), eq("shared-key"), any(BookingResponse.class));
     }
 
@@ -178,7 +178,7 @@ class BookingControllerWebTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("Invalid Authorization header"));
 
-        verify(bookingService, never()).createBooking(any(), any());
+        verify(bookingService, never()).createBooking(any(), any(), any());
     }
 
     @Test

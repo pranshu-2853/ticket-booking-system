@@ -61,7 +61,7 @@ class BookingConcurrencySafetyNetTest extends AbstractBookingIntegrationTest {
             futures.add(executor.submit(() -> {
                 try {
                     latch.await();
-                    bookingService.createBooking(userId, seatId);
+                    bookingService.createBooking(userId, seatId, java.util.UUID.randomUUID().toString());
                 } catch (Exception ignored) {
                 }
                 return null;

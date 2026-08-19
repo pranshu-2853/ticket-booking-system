@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.*;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Optional;
+import java.util.UUID;
 
 @Slf4j
 @RestController
@@ -64,7 +65,15 @@ public class BookingController {
             }
         }
 
-        Booking booking = bookingService.createBooking(userId, request.getSeatId());
+        // Payment idempotency key, derived from the booking Idempotency-Key so it
+        // is stable across retries of the same booking request. When the client
+        // sends no Idempotency-Key we fall back to a per-attempt server UUID —
+        // cross-HTTP-request payment dedup then requires a client-supplied key.
+        String paymentKey = (idempotencyKey != null)
+                ? userId + ":" + idempotencyKey
+                : UUID.randomUUID().toString();
+
+        Booking booking = bookingService.createBooking(userId, request.getSeatId(), paymentKey);
 
         BookingResponse response = new BookingResponse(
                 booking.getId(),

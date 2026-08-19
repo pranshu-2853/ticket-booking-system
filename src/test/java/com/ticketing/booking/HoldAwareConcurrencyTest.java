@@ -91,7 +91,7 @@ class HoldAwareConcurrencyTest extends AbstractBookingIntegrationTest {
             futures.add(executor.submit(() -> {
                 try {
                     latch.await();
-                    bookingService.createBooking(userId, seatId);
+                    bookingService.createBooking(userId, seatId, java.util.UUID.randomUUID().toString());
                     winner.set(userId);
                 } catch (Exception e) {
                     failureCounts.merge(e.getClass().getSimpleName(), 1, Integer::sum);
