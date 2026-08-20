@@ -618,7 +618,7 @@ Schema is version-controlled through Flyway, `V1` to `V8`. `V7` adds the nullabl
 
 ```bash
 docker compose up -d
-mvn clean test
+.\mvnw.cmd clean test
 ```
 
 ```
@@ -694,7 +694,7 @@ git clone https://github.com/pranshu-2853/ticket-booking-system.git
 cd ticket-booking-system
 cp .env.example .env      # then fill in the local values shown below
 docker compose up -d
-mvn spring-boot:run
+.\mvnw.cmd spring-boot:run
 ```
 
 - App: `http://localhost:8080`
@@ -746,8 +746,8 @@ The application is deployed as a Dockerized Spring Boot web service on Render.
 
 ```text
                          ┌──────────────────────┐
-                         │   Neon PostgreSQL     │
-                         │   source of truth     │
+                         │   Neon PostgreSQL    │
+                         │   source of truth    │
                          └──────────▲───────────┘
                                     │
 Client ───── HTTPS ──────> Render ──┤
