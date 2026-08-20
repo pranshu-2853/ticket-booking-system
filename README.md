@@ -71,7 +71,7 @@ flowchart LR
     style B fill:#8250df,color:#fff
 ```
 
-The trade this makes is explicit and worth stating up front: it removes a long lock hold and introduces a new failure mode — a seat can be left stranded in `RESERVED` if the process dies between T1 and T2. That's what the [reservation sweeper](#reservation-sweeper) exists to clean up. A design that fixes one problem by creating another is only defensible if the second one is actually handled.
+Trade-off: Moving payment outside the seat-lock transaction avoids long-held database locks, but means a process failure between reservation and confirmation can leave a seat temporarily stuck in RESERVED. The reservation sweeper periodically detects expired reservations and releases them back to AVAILABLE.
 
 ---
 
