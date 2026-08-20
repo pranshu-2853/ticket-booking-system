@@ -2,7 +2,7 @@
 
 A production-style backend built around one question: **when hundreds of people hit "Book" on the same seat at the same millisecond, how do you guarantee exactly one of them gets it — without serializing everyone behind a payment call?**
 
-Spring Boot 3, PostgreSQL, and Redis. Reserve-then-pay booking flow, row-level pessimistic locking, a scheduled reclaimer for abandoned reservations, JWT authentication, circuit breaker and retry on payment, per-user idempotency keys, and Flyway-managed migrations.
+Spring Boot 3, PostgreSQL, and Redis. Reserve-then-pay booking flow, row-level pessimistic locking, a scheduled reclaimer for abandoned reservations, JWT authentication, circuit breaker and retry on payment, per-user booking idempotency plus durable payment-level idempotency backed by a PostgreSQL `payments` table, and Flyway-managed migrations.
 
 **Production deployment:** Dockerized Spring Boot application on Render, PostgreSQL on Neon, and Redis on Upstash.
 
@@ -79,6 +79,9 @@ The trade this makes is explicit and worth stating up front: it removes a long l
 
 ```mermaid
 flowchart TB
+    PG[("PostgreSQL<br/>source of truth<br/>seats · bookings · payments")]
+    RD[("Redis<br/>seat holds · booking + payment cache")]
+
     subgraph app["Spring Boot Application"]
         direction TB
         subgraph mods["Modules"]
@@ -90,24 +93,34 @@ flowchart TB
         end
 
         subgraph booksvc["booking internals"]
-            direction LR
+            direction TB
             ORCH["BookingService<br/><i>orchestrator — no @Transactional</i>"]
-            TXN["BookingTransactionService<br/><i>REQUIRES_NEW units</i>"]
-            PAY["PaymentService<br/><i>@CircuitBreaker + @Retry</i>"]
+            TXN["BookingTransactionService<br/><i>REQUIRES_NEW: reserve / confirm / revert</i>"]
+            IPS["IdempotentPaymentService<br/><i>payment idempotency orchestrator</i>"]
+            PREC["PaymentRecordService<br/><i>REQUIRES_NEW: payment records</i>"]
+            PAY["PaymentService<br/><i>mock + @CircuitBreaker + @Retry</i>"]
             SWEEP["ReservationSweeper<br/><i>@Scheduled</i>"]
+
+            ORCH --> TXN
+            ORCH --> IPS
+            IPS --> PREC
+            IPS --> PAY
         end
 
         mods --> booksvc
     end
 
-    app --> PG[("PostgreSQL<br/>source of truth")]
-    app --> RD[("Redis<br/>seat holds + idempotency")]
+    TXN --> PG
+    PREC --> PG
+    SWEEP --> PG
+    TXN --> RD
+    IPS --> RD
 
     style PG fill:#1f6feb,color:#fff
     style RD fill:#b62324,color:#fff
 ```
 
-`BookingTransactionService` is a **separate bean**, not a private method. Spring's `@Transactional` works through a proxy, so a `REQUIRES_NEW` method invoked from within the same class would silently join the caller's transaction and the entire reserve/pay/confirm split would collapse back into one long transaction — the exact thing it was built to avoid. Separating the bean is what makes the boundaries real.
+`BookingTransactionService` is a **separate bean**, not a private method. Spring's `@Transactional` works through a proxy, so a `REQUIRES_NEW` method invoked from within the same class would silently join the caller's transaction and the entire reserve/pay/confirm split would collapse back into one long transaction — the exact thing it was built to avoid. Separating the bean is what makes the boundaries real. The same reasoning drives the payment components: `IdempotentPaymentService` orchestrates, `PaymentRecordService` holds the `REQUIRES_NEW` payment-record writes as a separate bean, and `PaymentService` (the mock gateway) stays separate so its Resilience4j aspects keep firing through the proxy rather than being bypassed by a self-invocation.
 
 **Why a modular monolith rather than microservices.** Seat state and booking rows have to move together atomically. Splitting them across services would replace a local transaction with a saga — compensating actions, eventual consistency, message ordering — for no gain at this scale. The module boundaries are clean enough that extraction stays possible later.
 
@@ -122,9 +135,11 @@ sequenceDiagram
     participant BC as BookingController
     participant BS as BookingService<br/>(orchestrator)
     participant TX as BookingTransactionService
+    participant IPS as IdempotentPaymentService
+    participant PR as PaymentRecordService
+    participant P as PaymentService
     participant DB as PostgreSQL
     participant R as Redis
-    participant P as PaymentService
 
     C->>BC: POST /bookings<br/>(+ optional Idempotency-Key)
     BC->>R: GET idem:{userId}:{key}
@@ -133,7 +148,8 @@ sequenceDiagram
         BC-->>C: 201 Created (replay)
     end
 
-    BC->>BS: createBooking(userId, seatId)
+    BC->>BC: paymentKey = userId:idemKey<br/>(or random UUID if no key)
+    BC->>BS: createBooking(userId, seatId, paymentKey)
 
     rect rgb(31, 111, 235, 0.12)
     note over BS,DB: T1 — REQUIRES_NEW, row lock held
@@ -148,9 +164,24 @@ sequenceDiagram
     end
 
     rect rgb(130, 80, 223, 0.12)
-    note over BS,P: No lock. No open transaction.
-    BS->>P: process()
-    P-->>BS: true, or throws after retries
+    note over BS,P: Payment — no seat lock, no open booking transaction
+    BS->>IPS: pay(paymentKey, userId, seatId)
+    IPS->>R: GET pay:{paymentKey}
+    alt Redis cache = SUCCESS
+        R-->>IPS: SUCCESS — skip charge
+    else cache miss / Redis down
+        IPS->>PR: findByKey(paymentKey)
+        alt payment record already SUCCESS
+            PR-->>IPS: SUCCESS — skip charge
+        else no record yet
+            IPS->>PR: INSERT payment INITIATED<br/>(REQUIRES_NEW, UNIQUE key)
+            IPS->>P: process()
+            P-->>IPS: true, or throws after retries
+            IPS->>PR: UPDATE payment SUCCESS / FAILED
+            IPS->>R: SET pay:{paymentKey} = SUCCESS (24h)
+        end
+    end
+    IPS-->>BS: true, or throws
     end
 
     alt payment succeeded
@@ -181,6 +212,8 @@ Two details in that diagram carry most of the correctness:
 **T2 re-checks the status after re-acquiring the lock.** Between T1 committing and T2 starting, the seat is `RESERVED` but *unlocked*. The sweeper could have reclaimed it. If T2 finds anything other than `RESERVED`, it aborts with `SeatReservationLostException` rather than writing a booking row against a seat it no longer owns.
 
 **The revert runs in a `finally`.** Payment's failure mode is a thrown `PaymentServiceUnavailableException`, not a `false` return. Without the `finally`, every payment failure would strand a reservation and hand the cleanup to the sweeper minutes later instead of immediately.
+
+**Payment runs through a durable idempotency layer.** `BookingService` no longer calls `PaymentService.process()` directly — it calls `IdempotentPaymentService.pay(paymentKey, ...)`, which consults Redis and a PostgreSQL `payments` record before ever charging, so a repeated request maps to the same payment rather than a second charge. The charge itself still runs outside any booking transaction; only the payment *record* is written, in its own short `REQUIRES_NEW` transactions. Details in [Idempotency](#idempotency).
 
 ---
 
@@ -369,6 +402,10 @@ The test stays in the suite as a regression guard so nobody swaps the numbers on
 
 ## Idempotency
 
+Two distinct idempotency mechanisms exist here, and they are not the same thing. **Booking idempotency** makes the HTTP request replayable; **payment idempotency** makes the charge itself happen at most once. The project *derives* the payment key from the booking key because payment is part of the same booking operation — not because the two are the same concept.
+
+### A. Booking idempotency
+
 An optional `Idempotency-Key` header makes retried booking requests safe:
 
 ```
@@ -380,6 +417,33 @@ The response is cached in Redis for 24 hours under `idem:{userId}:{key}`, and a 
 **The key is scoped per user.** A globally-scoped key would collide when two clients happened to generate the same UUID — or when one deliberately reused another's — and the second caller would receive the first caller's `bookingId` and `userId`. Scoping by user makes that structurally impossible.
 
 **What this protects and what it doesn't.** The cache entry is written *after* processing completes. That covers the sequential case — a client retries after a timeout or a user double-submits a few seconds apart. It does **not** cover two identical requests arriving simultaneously: both find an empty cache and both proceed. Preventing that would require writing an in-flight marker before processing. For the same-seat case it doesn't matter, because the reservation and the unique constraint stop the duplicate anyway.
+
+### B. Payment idempotency
+
+The payment key is derived in the controller from the booking key:
+
+```java
+String paymentKey = (idempotencyKey != null)
+        ? userId + ":" + idempotencyKey
+        : UUID.randomUUID().toString();
+```
+
+When the client sends an `Idempotency-Key`, the payment key is stable across retries of the same booking request, so a retried request maps to the same payment record. When no key is sent, a fresh random UUID is generated **per attempt** — each attempt is then its own payment, so cross-request payment deduplication requires the client to supply a key.
+
+`IdempotentPaymentService.pay(paymentKey, userId, seatId)` resolves in order:
+
+1. **Redis fast path** — `GET pay:{paymentKey}`; if it reads `SUCCESS`, return immediately without charging. Fail-open: a Redis error is treated as a miss.
+2. **PostgreSQL durable record** — on a cache miss, look up the `payments` row by its `UNIQUE` `payment_idempotency_key`. If it is already `SUCCESS`, return without charging (and repopulate the cache).
+3. **Charge once** — if no record exists, INSERT an `INITIATED` row in its own `REQUIRES_NEW` transaction, call the existing `PaymentService.process()`, then UPDATE the row to `SUCCESS` or `FAILED` and cache `SUCCESS` in Redis.
+
+The record is written **before** the charge so the payment's identity is durable even if the process dies mid-charge. Two properties follow from the `INITIATED → SUCCESS/FAILED` lifecycle plus the `UNIQUE` key:
+
+- **Redis is only a cache.** If Redis is unavailable *or* the cache entry is simply missing, the PostgreSQL record still stops an already-`SUCCESS` payment from being charged again. PostgreSQL is the source of truth; Redis just makes the common case fast.
+- **Concurrent duplicates collapse to one charge.** Two requests with the same key race on the INSERT; the `UNIQUE` constraint lets exactly one create the `INITIATED` row and call `process()`. The loser catches the constraint violation and defers to the existing record instead of charging again.
+
+A `FAILED` record can be retried on the same row — no second row is ever created for one key — and only a `SUCCESS` short-circuits the charge.
+
+> The charge itself is still simulated. `PaymentService.process()` is unchanged (`Math.random() < 0.3` throws), wrapped by the existing Resilience4j retry and circuit breaker. Payment idempotency is about not repeating that simulated call, not about integrating a real gateway.
 
 ---
 
@@ -424,8 +488,10 @@ erDiagram
     ROLES ||--o{ USERS : "assigned to"
     USERS ||--o{ BOOKINGS : places
     USERS ||--o{ REFRESH_TOKENS : owns
+    USERS ||--o{ PAYMENTS : makes
     EVENTS ||--o{ SEATS : contains
     SEATS ||--o| BOOKINGS : "booked by (UNIQUE)"
+    SEATS ||--o{ PAYMENTS : "paid for"
 
     ROLES {
         bigint id PK
@@ -470,9 +536,20 @@ erDiagram
         varchar token
         timestamp expiry_date
     }
+
+    PAYMENTS {
+        bigint id PK
+        varchar payment_idempotency_key UK
+        bigint user_id FK
+        bigint seat_id FK
+        numeric amount "NUMERIC(10,2)"
+        varchar status "INITIATED / SUCCESS / FAILED"
+        timestamp created_at
+        timestamp updated_at
+    }
 ```
 
-Schema is version-controlled through Flyway, `V1` to `V7`. `V7` adds the nullable `reserved_until` column the sweeper keys off. `status` is stored as a string with no DB-level `CHECK` constraint, which is why adding `RESERVED` to the enum needed no migration of its own.
+Schema is version-controlled through Flyway, `V1` to `V8`. `V7` adds the nullable `reserved_until` column the sweeper keys off; `V8` adds the `payments` table, whose `payment_idempotency_key` carries the `UNIQUE` constraint (`uq_payment_idem_key`) that anchors payment idempotency, with foreign keys to `users` and `seats`. `status` on both `seats` and `payments` is stored as a string with no DB-level `CHECK` constraint, which is why adding `RESERVED` to the seat enum needed no migration of its own.
 
 ---
 
@@ -529,6 +606,10 @@ Schema is version-controlled through Flyway, `V1` to `V7`. `V7` adds the nullabl
 | Redis unavailable                         | Holds and idempotency degrade silently; bookings continue             |
 | Seat hold expires                         | Redis TTL removes the key after 5 minutes                             |
 | Duplicate sequential booking request      | Idempotency key replays the cached 201 response                       |
+| Duplicate / retried payment (same key)    | Redis cache or the `payments` record returns the prior `SUCCESS`; `process()` is not called again |
+| Redis cache missing for a prior payment   | PostgreSQL `payments` record (UNIQUE key) still blocks a second charge |
+| Concurrent identical payment requests     | UNIQUE `payment_idempotency_key`: one INSERT wins and charges, the other defers — one charge |
+| Payment succeeds but seat reclaimed before confirm | T2 aborts with `SeatReservationLostException`; payment stays `SUCCESS` with no booking (known limitation) |
 | Two booking rows for one seat             | `seat_id UNIQUE` rejects the second insert at the database            |
 
 ---
@@ -541,17 +622,18 @@ mvn clean test
 ```
 
 ```
-99 tests — 0 failures — 0 errors
+109 tests — 0 failures — 0 errors — 0 skipped
 
 Controller tests        — auth, booking, seat, event
 Service tests           — orchestration, transaction units, payment, hold logic
+Payment idempotency     — durable record, Redis/Postgres fallback, concurrent duplicate charge
 Concurrency tests       — 8-thread races, hold-aware races
 Sweeper race tests      — both orderings of sweeper vs. confirm
 Resilience tests        — retry attempt counting, fallback behaviour
 Exception handler tests — every custom exception mapping
 ```
 
-**The suite runs against an empty database.** Integration tests extend a shared base that seeds its own event, seats, and users in `@BeforeEach` rather than depending on pre-existing rows. Verified by running the full suite against a freshly created database with only Flyway migrations applied — 99 passing. Postgres and Redis must be running (`docker compose up -d`); the concurrency tests exercise real row locking rather than mocking it out.
+**The suite runs against an empty database.** Integration tests extend a shared base that seeds its own event, seats, and users in `@BeforeEach` rather than depending on pre-existing rows. Verified by running the full suite against a freshly created database with only Flyway migrations applied — 109 passing, 0 skipped. Postgres and Redis must be running (`docker compose up -d`); the concurrency tests exercise real row locking rather than mocking it out, and payment idempotency is covered by `IdempotentPaymentServiceTest` (unit) and `PaymentIdempotencyIntegrationTest` (concurrent duplicate charge, plus a Redis-evicted PostgreSQL fallback, both against the real containers). Configuration is loaded from the git-ignored `.env` automatically (see [Running Locally](#running-locally)), so no manual environment export is required to run the suite.
 
 An earlier version of the suite hardcoded seat and user IDs that existed only in a local Docker volume. It passed on the machine it was written on and would have failed on every clone. Self-seeding fixtures are the fix; the lesson is that a green suite proves nothing about a suite you have never run somewhere else.
 
@@ -562,6 +644,8 @@ An earlier version of the suite hardcoded seat and user IDs that existed only in
 These are real. They are listed because a design document that admits nothing is not worth reading.
 
 - **Payment is simulated.** `Math.random() < 0.3`. The resilience patterns wrapping it are genuine, but no measurement here reflects the behaviour of a real gateway, and no performance claim in this document is backed by a benchmark. The reserve-then-pay restructure was made for architectural correctness, not a measured throughput win.
+
+- **Payment can succeed without a booking (consistency window).** The charge runs outside the reserve/confirm database transaction. If it takes longer than the two-minute reservation window and the sweeper reclaims the seat — possibly rebooked by someone else — before T2, the `payments` record reaches `SUCCESS` while T2 aborts with `SeatReservationLostException`: a durable payment with no booking. This is deliberately **not** solved here by authorization/capture or refunds. The production fixes would be to *authorize the payment and capture it only after the seat is confirmed*, or to run a *compensating refund / reconciliation* job — neither is implemented in this project. Payment idempotency does not close this window; it only guarantees the charge is not *repeated*.
 
 - **Concurrency tests stub payment.** Under reserve-then-pay, the first thread reserves before paying, so contenders fail fast rather than queueing. A single random payment failure therefore yields *zero* bookings for that batch, not one — the old single-transaction flow let the next queued thread absorb the failure. Better lock duration, less cross-thread payment resilience. Tests stub payment to isolate locking behaviour; `PaymentServiceRetryTest` covers payment separately.
 
@@ -591,7 +675,7 @@ These are real. They are listed because a design document that admits nothing is
 | Database         | PostgreSQL                  |
 | ORM              | Spring Data JPA / Hibernate |
 | Cache            | Redis                       |
-| Migrations       | Flyway (V1–V7)              |
+| Migrations       | Flyway (V1–V8)              |
 | Resilience       | Resilience4j                |
 | API docs         | Swagger / OpenAPI 3         |
 | Testing          | JUnit 5, Mockito, ExecutorService |
@@ -608,6 +692,7 @@ These are real. They are listed because a design document that admits nothing is
 ```bash
 git clone https://github.com/pranshu-2853/ticket-booking-system.git
 cd ticket-booking-system
+cp .env.example .env      # then fill in the local values shown below
 docker compose up -d
 mvn spring-boot:run
 ```
@@ -617,12 +702,14 @@ mvn spring-boot:run
 
 Flyway builds the schema on startup and seeds demo data. The test suite seeds its own fixtures and needs no pre-existing rows.
 
+The application imports the git-ignored `.env` automatically via `spring.config.import=optional:file:.env[.properties]` in `application.properties`, so `mvn spring-boot:run` and `mvn test` pick up the values with **no manual `export` / `$env:` step**. The `optional:` prefix means the import is simply skipped when `.env` is absent — for example on Render, where real environment variables are supplied instead.
+
 ### Environment variables
 
 ```env
 DB_URL=jdbc:postgresql://localhost:5332/ticketdb
-DB_USER=postgres
-DB_PASSWORD=your-local-db-password
+DB_USER=admin
+DB_PASSWORD=admin
 REDIS_HOST=localhost
 REDIS_PORT=6380
 REDIS_PASSWORD=
@@ -630,7 +717,7 @@ REDIS_SSL_ENABLED=false
 JWT_SECRET=your-secret-key
 ```
 
-Postgres is published on host port **5332** (`docker-compose.yml` maps `5332:5432`) so it does not clash with a local Postgres install. Redis uses the corresponding host-mapped port from the local Docker Compose setup. See `.env.example` for the full list.
+`DB_USER` / `DB_PASSWORD` match the `docker-compose.yml` Postgres credentials (`admin` / `admin`). Postgres is published on host port **5332** (`docker-compose.yml` maps `5332:5432`) so it does not clash with a local Postgres install, and Redis on **6380**. `.env.example` is the committed template with empty values; copy it to `.env` and fill in the values above. `.env` itself is git-ignored and never committed or deployed.
 
 ### Swagger access
 
@@ -674,7 +761,7 @@ Client ───── HTTPS ──────> Render ──┤
                          └───────────────────────┘
 ```
 
-The Dockerfile is used to build and run the Spring Boot application. Docker Compose remains a local-development setup for PostgreSQL and Redis; those local containers are not deployed to Render.
+The Dockerfile is used to build and run the Spring Boot application. Docker Compose remains a local-development setup for PostgreSQL and Redis; those local containers are not deployed to Render. The local `.env` file is git-ignored and never deployed; the `spring.config.import` that reads it is marked `optional:`, so on Render it is a no-op and configuration comes entirely from Render's own environment variables.
 
 ### Production environment variables
 
