@@ -10,7 +10,7 @@ Spring Boot 3, PostgreSQL, and Redis. Reserve-then-pay booking flow, row-level p
 
 ## Live Demo
 
-**Base URL:** [Live API](https://ticket-booking-system-stkb.onrender.com)
+**Base URL:** [Live API](https://ticket-booking-system-stkb.onrender.com/)
 
 **Swagger UI:** [Open Swagger UI](https://ticket-booking-system-stkb.onrender.com/swagger-ui/index.html)
 
